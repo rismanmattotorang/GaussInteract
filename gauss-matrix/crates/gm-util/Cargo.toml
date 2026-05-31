@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "gm-util"
+description = "GaussMatrix shared primitives: validated Matrix identifiers and the common error type."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "gm_util"
+
+[dependencies]
+
+[dev-dependencies]

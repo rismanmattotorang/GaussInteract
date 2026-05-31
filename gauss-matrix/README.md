@@ -38,12 +38,20 @@ gauss-matrix/
     │       ├── capability.rs # CapabilityGrant + classify (auto/review/forbidden)
     │       ├── events.rs     # m.gauss.agent.* events the gateway reflects
     │       └── mcp.rs        # MCP tool-call ingress + ToolExecutor
-    └── gm-store/         # pluggable storage abstraction (§III.C)
+    ├── gm-store/         # pluggable storage abstraction (§III.C)
+    │   └── src/
+    │       ├── lib.rs        # Store trait + per-domain column families (cf::*)
+    │       ├── memory.rs     # in-memory backend (RocksDB/distributed-KV later)
+    │       └── audit.rs      # durable, tamper-evident audit log (§IV.D)
+    └── gm-util/          # shared primitives (§III.B)
         └── src/
-            ├── lib.rs        # Store trait + per-domain column families (cf::*)
-            ├── memory.rs     # in-memory backend (RocksDB/distributed-KV later)
-            └── audit.rs      # durable, tamper-evident audit log (§IV.D)
+            ├── ids.rs        # validated UserId / RoomId / AgentId newtypes
+            └── error.rs      # the common GmError
 ```
+
+The gateway validates inbound agent/room identifiers through `gm-util` before
+mediating — agents and rooms are principals, so malformed ids are refused (and
+audited) before they reach classification or the room.
 
 ### What `gm-agent` already does
 
@@ -77,8 +85,8 @@ cargo fmt --check
 ## Remaining crates (spec §III.B)
 
 `gm-http` · `gm-api` · `gm-svc` · `gm-stateres` · `gm-fed` · `gm-e2ee` ·
-`gm-shard` · `gm-obs` · `gm-util` — added as implemented (`gm-agent` and
-`gm-store` are in place). The remaining live `gm-agent` wiring (Application
+`gm-shard` · `gm-obs` — added as implemented (`gm-agent`, `gm-store` and
+`gm-util` are in place). The remaining live `gm-agent` wiring (Application
 Service registration for cross-signed agent identities, the MCP transport, and
 E2EE-aware mediation via `gm-e2ee`) lands behind the `mcp` feature; the
 RocksDB / distributed-KV `gm-store` backends land behind their own features.

@@ -22,6 +22,7 @@ mcp = []
 
 [dependencies]
 gm-store = { path = "../gm-store" }
+gm-util = { path = "../gm-util" }
 # Further deps the implementation will add: ruma (Matrix types), the
 # Application Service client, an MCP transport, tokio, serde, thiserror.
 

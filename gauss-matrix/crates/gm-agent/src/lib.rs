@@ -56,6 +56,7 @@ use crate::clock::{Clock, SystemClock};
 use crate::events::ReflectedEvent;
 use crate::mcp::{ToolCall, ToolExecutor};
 use gm_store::{audit, MemoryStore, Store};
+use gm_util::{AgentId, RoomId};
 use std::fmt;
 
 /// The rate-limit window: tool calls per agent are counted over this many
@@ -226,6 +227,25 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
         call: ToolCall,
         executor: &mut E,
     ) -> Outcome {
+        // Agents and rooms are principals: reject malformed identifiers before
+        // anything else, so they never reach classification or the room.
+        if AgentId::parse(&call.agent).is_err() || RoomId::parse(&call.room).is_err() {
+            audit::append(
+                &mut self.store,
+                &call.agent,
+                &format!(
+                    "rejected_identifier: agent={} room={}",
+                    call.agent, call.room
+                ),
+            );
+            return Outcome::Denied {
+                reason: format!(
+                    "malformed agent or room identifier (agent={}, room={})",
+                    call.agent, call.room
+                ),
+                events: Vec::new(),
+            };
+        }
         let class = grant.classify(&call.tool, &call.room);
         if class == ActionClass::Forbidden {
             audit::append(
@@ -532,5 +552,22 @@ mod tests {
             gw.handle(&grant, allowed, &mut exec),
             Outcome::Executed { .. }
         ));
+    }
+
+    #[test]
+    fn malformed_identifiers_are_rejected_before_classification() {
+        let mut gw = AgentGateway::new();
+        let mut exec = EchoExecutor;
+        // Room id missing its `!` sigil — refused before scope/rate checks.
+        let bad_room = ToolCall::new("@assistant:gaussian.tech", "not-a-room", "search", "q");
+        match gw.handle(&grant(), bad_room, &mut exec) {
+            Outcome::Denied { reason, events } => {
+                assert!(reason.contains("identifier"));
+                assert!(events.is_empty());
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        assert_eq!(gw.audit_entries().len(), 1);
+        assert_eq!(gw.verify_audit(), Ok(()));
     }
 }
