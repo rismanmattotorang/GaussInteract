@@ -46,18 +46,23 @@ path = [
 SPDX-FileCopyrightText = "Matrix Foundation"
 SPDX-License-Identifier = "Apache-2.0"
 
-# App Logo
+# App Logo / brand assets (regenerated for GaussInteract via
+# scripts/generate_brand_assets.sh — no longer the FluffyChat logo).
 [[annotations]]
 path = [
     "assets/logo/**",
     "android/app/src/main/res/mipmap**/**",
+    "android/app/src/main/res/drawable**/ic_launcher**",
+    "android/app/src/main/res/drawable**/notifications_icon.png",
+    "android/app/src/main/res/drawable**/splash.png",
     "ios/Runner/Assets.xcassets/AppIcon.appiconset/**",
     "macos/Runner/Assets.xcassets/AppIcon.appiconset/**",
     "web/icons/**",
     "web/splash/**",
+    "web/favicon.png",
     "snap/gui/*.png",
     "windows/runner/resources/app_icon.ico"
 ]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "2019-Present Christian Kußowski"
+SPDX-FileCopyrightText = "2026-Present Gaussian Technologies"
 SPDX-License-Identifier = "LicenseRef-AllRightsReserved"

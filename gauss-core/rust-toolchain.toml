@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+# Targets added as the native/WASM build matrix lands (GaussInteract-SPECS §V):
+#   aarch64-linux-android, aarch64-apple-ios, wasm32-unknown-unknown, etc.

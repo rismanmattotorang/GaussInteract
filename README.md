@@ -6,10 +6,16 @@ SPDX-FileCopyrightText: 2019-Present Contributors to FluffyChat
 SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 
-# GaussInteract
+<p align="center">
+  <img src="assets/logo/img/logo_font.png" alt="GaussInteract" height="84">
+</p>
 
-**The agentic-AI messaging client for sovereign enterprise communication.**
-*A deep-tech product by [Gaussian Technologies](https://gaussian.tech).*
+<h1 align="center">GaussInteract</h1>
+
+<p align="center">
+  <b>The agentic-AI messaging client for sovereign enterprise communication.</b><br>
+  <i>A deep-tech product by <a href="https://gaussian.tech">Gaussian Technologies</a>.</i>
+</p>
 
 ---
 
@@ -59,6 +65,8 @@ GaussInteract is specified as a **hybrid client**: one shared Rust core behind o
 
 - **One presentation codebase, one shared core, four native targets.** The heavy paths (sync, state, decryption) run in Rust rather than the Dart VM, so per-platform hand-rolled crypto is excluded by construction.
 - **Performance target:** `< 1.2 s` cold-start-to-interactive on mid-range mobile via simplified sliding sync and a persisted, incremental timeline cache.
+
+The Rust core scaffold lives in [`gauss-core/`](./gauss-core) — a compilable, `#![forbid(unsafe_code)]` skeleton of the module boundaries above, already including a working human-in-the-loop approval flow and tamper-evident audit log. See [`gauss-core/README.md`](./gauss-core/README.md).
 
 ---
 

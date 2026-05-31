@@ -72,3 +72,9 @@ web/pkg/package.json
 web/pkg/vodozemac_bindings_dart_bg.wasm
 web/pkg/vodozemac_bindings_dart.js
 web/native_executor.js*
+
+# Rust (gauss-core)
+gauss-core/target/
+**/*.rs.bk
+# NB: gauss-core/Cargo.lock IS committed — GaussInteract-SPECS §VI.C mandates a
+# pinned dependency tree and reproducible builds.

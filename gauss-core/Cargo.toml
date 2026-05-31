@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# `gauss-core` — the shared, memory-safe Rust core of GaussInteract.
+# Specified in GaussInteract-SPECS.pdf §V (hybrid client architecture):
+# one Rust core, exposed to a single Flutter UI through uniffi, owning the
+# client-server protocol, the local event store/timeline cache, simplified
+# sliding sync, and E2EE delegated to vodozemac.
+#
+# This is the Phase-1 scaffold: std-only, dependency-free, and compilable so
+# the architecture and public surface can be reviewed and iterated before the
+# matrix-rust-sdk / vodozemac / uniffi dependencies are wired in (see README).
+
+[workspace]
+# Stand-alone workspace boundary so this Rust tree is independent of the
+# Flutter project around it. Future focused crates can be added as members.
+members = ["."]
+
+[package]
+name = "gauss-core"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.78"
+description = "Shared, memory-safe Rust core for the GaussInteract Matrix client."
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/rismanmattotorang/gaussinteract"
+publish = false
+
+[lib]
+name = "gauss_core"
+# `staticlib`/`cdylib` are the targets a future uniffi/FFI build will emit for
+# the native mobile/desktop libraries; `rlib` keeps it usable as a plain crate.
+crate-type = ["lib"]
+
+[features]
+default = []
+# Enables the uniffi binding layer (adds the `uniffi` dependency). Off by
+# default so the scaffold builds with no network/registry access.
+ffi = []
+
+[dependencies]
+# Intentionally empty for the scaffold. The Phase-1/2 implementation will add:
+#   matrix-rust-sdk (sync, CS protocol, store), vodozemac (E2EE),
+#   ruma (protocol types), tokio (async), serde, thiserror, uniffi.
+
+[dev-dependencies]

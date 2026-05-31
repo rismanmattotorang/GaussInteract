@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# cargo-deny policy. GaussInteract-SPECS §VI.C mandates that every merge is
+# gated on `cargo audit` (advisories) and `cargo deny` (licence + dependency
+# policy), with a pinned tree and reproducible builds.
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Permissive licences acceptable for the shared core (the core is specified to
+# carry a permissive licence enabling commercial derivatives, §VII).
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
