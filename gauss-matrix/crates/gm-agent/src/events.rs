@@ -21,15 +21,56 @@ pub const TYPE_TOOL_CALL: &str = "m.gauss.agent.tool_call";
 pub const TYPE_TOOL_RESULT: &str = "m.gauss.agent.tool_result";
 /// `m.gauss.agent.approval` — a human approve/deny receipt.
 pub const TYPE_APPROVAL: &str = "m.gauss.agent.approval";
+/// `m.gauss.agent.capability` — an agent's capability grant (room state, §IV.C).
+pub const TYPE_CAPABILITY: &str = "m.gauss.agent.capability";
 
 /// A JSON-ish content value. Kept minimal (no serde dependency yet) but
-/// sufficient to model the booleans and strings the agent events carry.
+/// sufficient to model the strings, booleans, numbers and lists the agent
+/// events and capability grants carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     /// A string field.
     Str(String),
     /// A boolean field.
     Bool(bool),
+    /// An unsigned-integer field.
+    U64(u64),
+    /// A list of values.
+    List(Vec<Value>),
+}
+
+impl Value {
+    /// The string, if this is a [`Value::Str`].
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The boolean, if this is a [`Value::Bool`].
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// The integer, if this is a [`Value::U64`].
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::U64(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// The elements, if this is a [`Value::List`].
+    pub fn as_list(&self) -> Option<&[Value]> {
+        match self {
+            Value::List(v) => Some(v),
+            _ => None,
+        }
+    }
 }
 
 /// An event the gateway will send into a room. `content` maps directly onto the

@@ -91,6 +91,13 @@ Agents are **provisioned, not ad-hoc** (`appservice.rs`, §IV.A): an
 identity the Application Service did not provision, so an unprovisioned or
 impersonating principal cannot act even with a forged grant.
 
+Capability grants are **room state** (`capability.rs`, §IV.C):
+`CapabilityGrant::to_content` / `from_content` round-trip a grant to the
+`m.gauss.agent.capability` event content, so grants are visible, versioned,
+federated and revocable. Because that state can arrive from another server,
+`from_content` treats it as untrusted and re-validates every field — a grant
+carrying a malformed room id or unknown classification is rejected, not obeyed.
+
 ## Build & test
 
 ```bash
