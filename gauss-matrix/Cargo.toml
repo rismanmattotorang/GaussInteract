@@ -10,7 +10,7 @@
 
 [workspace]
 resolver = "2"
-members = ["crates/gm-agent"]
+members = ["crates/gm-agent", "crates/gm-store"]
 # Remaining crates from the spec's decomposition (§III.B), added as implemented:
 #   gm-http   CS/SS/AS ingress (axum/hyper)
 #   gm-api    typed request/response model (extends ruma)

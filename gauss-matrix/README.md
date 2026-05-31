@@ -18,13 +18,13 @@ gateway**.
 > **Apache-2.0** — matching its Tuwunel lineage and the spec's intent (§VII) of
 > a permissive core enabling commercial derivatives.
 
-## Status — `gm-agent` first
+## Status — `gm-agent` + `gm-store` first
 
 The workspace is being built crate-by-crate. We started with **`gm-agent`**,
-the agentic gateway (§IV), because it is the platform's most distinctive
-contribution and the *producer* of the `m.gauss.agent.*` events the
-GaussInteract client already renders inline (timeline bubbles, the approval
-console, and the audit view).
+the agentic gateway (§IV) — the platform's most distinctive contribution and
+the *producer* of the `m.gauss.agent.*` events the GaussInteract client already
+renders inline — backed by **`gm-store`**, the pluggable storage abstraction
+(§III.C), so the gateway's audit trail is durable from day one.
 
 ```
 gauss-matrix/
@@ -32,13 +32,17 @@ gauss-matrix/
 ├── rust-toolchain.toml
 ├── deny.toml             # cargo-deny policy (spec §VI.C)
 └── crates/
-    └── gm-agent/         # the agentic AI gateway
+    ├── gm-agent/         # the agentic AI gateway
+    │   └── src/
+    │       ├── lib.rs        # AgentGateway: the mediation pipeline
+    │       ├── capability.rs # CapabilityGrant + classify (auto/review/forbidden)
+    │       ├── events.rs     # m.gauss.agent.* events the gateway reflects
+    │       └── mcp.rs        # MCP tool-call ingress + ToolExecutor
+    └── gm-store/         # pluggable storage abstraction (§III.C)
         └── src/
-            ├── lib.rs        # AgentGateway: the mediation pipeline
-            ├── capability.rs # CapabilityGrant + classify (auto/review/forbidden)
-            ├── events.rs     # m.gauss.agent.* events the gateway reflects
-            ├── audit.rs      # authoritative tamper-evident audit log
-            └── mcp.rs        # MCP tool-call ingress + ToolExecutor
+            ├── lib.rs        # Store trait + per-domain column families (cf::*)
+            ├── memory.rs     # in-memory backend (RocksDB/distributed-KV later)
+            └── audit.rs      # durable, tamper-evident audit log (§IV.D)
 ```
 
 ### What `gm-agent` already does
@@ -55,10 +59,11 @@ tool call runs through one mediation pipeline:
    on `resolve(approve)` execute + reflect the result, on `resolve(deny)` emit a
    denial receipt. Either way it's audited.
 
-Every branch appends to a **hash-chained, tamper-evident audit log** whose
-`verify()` detects retroactive edits (§IV.D), and the reflected events carry
-exactly the content the client reads (`call_id`, `tool`, `args_summary`, `ok`,
-`summary`) — so server and client already agree on the wire shape.
+Every branch appends to a **durable, hash-chained, tamper-evident audit log**
+(persisted via `gm-store` in its own `audit_log` column family) whose `verify()`
+detects retroactive edits (§IV.D), and the reflected events carry exactly the
+content the client reads (`call_id`, `tool`, `args_summary`, `ok`, `summary`) —
+so server and client already agree on the wire shape.
 
 ## Build & test
 
@@ -72,7 +77,8 @@ cargo fmt --check
 ## Remaining crates (spec §III.B)
 
 `gm-http` · `gm-api` · `gm-svc` · `gm-stateres` · `gm-fed` · `gm-e2ee` ·
-`gm-store` · `gm-shard` · `gm-obs` · `gm-util` — added as implemented. The live
-`gm-agent` wiring (Application Service registration for cross-signed agent
-identities, the MCP transport, E2EE-aware mediation via `gm-e2ee`, and audit
-persistence in `gm-store`) lands behind the `mcp` feature.
+`gm-shard` · `gm-obs` · `gm-util` — added as implemented (`gm-agent` and
+`gm-store` are in place). The remaining live `gm-agent` wiring (Application
+Service registration for cross-signed agent identities, the MCP transport, and
+E2EE-aware mediation via `gm-e2ee`) lands behind the `mcp` feature; the
+RocksDB / distributed-KV `gm-store` backends land behind their own features.

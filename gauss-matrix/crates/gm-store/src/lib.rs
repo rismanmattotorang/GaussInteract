@@ -1,0 +1,58 @@
+// SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+// SPDX-License-Identifier: Apache-2.0
+
+//! # gm-store
+//!
+//! The GaussMatrix pluggable storage abstraction (GaussInteract-SPECS §III.C):
+//! a backend-agnostic [`Store`] trait keyed by explicit, per-domain **column
+//! families**, behind which a deployment chooses its backend (a tuned RocksDB
+//! for the single-node profile, a distributed KV for the sharded profile)
+//! without touching the service core.
+//!
+//! This scaffold ships the in-memory [`MemoryStore`] backend and the durable,
+//! tamper-evident [`audit`] log (§IV.D) — the column family the agentic gateway
+//! writes every decision to. The RocksDB / distributed backends land behind
+//! cargo features later.
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+#![deny(rust_2018_idioms)]
+
+pub mod audit;
+mod memory;
+
+pub use memory::MemoryStore;
+
+/// Explicit, per-domain column families (spec §III.C). Named rather than
+/// stringly-typed at call sites so the storage domains are enumerable.
+pub mod cf {
+    /// Persisted room events.
+    pub const EVENTS: &str = "events";
+    /// Resolved room state.
+    pub const ROOM_STATE: &str = "room_state";
+    /// Agent capability grants (room state, §IV.C).
+    pub const CAPABILITY_GRANTS: &str = "capability_grants";
+    /// The hash-chained agent audit log (§IV.D).
+    pub const AUDIT_LOG: &str = "audit_log";
+}
+
+/// A backend-agnostic, column-family keyed store.
+///
+/// Keys and values are opaque byte strings; ordering of [`Store::scan`] is by
+/// key, so callers that need ordered iteration (the audit log) encode sortable
+/// keys. The trait is deliberately small — the surface a pluggable backend must
+/// implement — and writes within a single logical operation are expected to be
+/// atomic in real backends (modelled trivially by the in-memory store).
+pub trait Store {
+    /// Insert or overwrite `key` in column family `cf`.
+    fn put(&mut self, cf: &str, key: &str, value: &[u8]);
+
+    /// Fetch `key` from column family `cf`, if present.
+    fn get(&self, cf: &str, key: &str) -> Option<Vec<u8>>;
+
+    /// All `(key, value)` pairs in `cf`, ordered by key ascending.
+    fn scan(&self, cf: &str) -> Vec<(String, Vec<u8>)>;
+
+    /// Number of entries currently in `cf`.
+    fn count(&self, cf: &str) -> usize;
+}

@@ -29,31 +29,31 @@
 //!                                          execute + tool_result | denied
 //! ```
 //!
-//! Every branch appends to a hash-chained [`audit::AuditLog`], and the events
-//! the gateway reflects ([`events::ReflectedEvent`]) carry exactly the content
-//! the GaussInteract client renders inline.
+//! Every branch appends to a durable, hash-chained audit log (`gm_store::audit`,
+//! §IV.D), and the events the gateway reflects ([`events::ReflectedEvent`])
+//! carry exactly the content the GaussInteract client renders inline.
 //!
 //! ## Status
 //!
-//! Phase-3 scaffold: std-only, dependency-free and compilable so the mediation
-//! logic and its guarantees are reviewable and tested. The live pieces — the
-//! Application Service registration that gives agents cross-signed identities,
-//! the MCP transport, E2EE-aware mediation via `gm-e2ee`, and persisting the
-//! audit log in `gm-store` — are wired behind the `mcp` feature later.
+//! Phase-3 scaffold: std-only and compilable so the mediation logic and its
+//! guarantees are reviewable and tested, with the audit trail already persisted
+//! through the pluggable [`gm_store::Store`] (the in-memory backend by default).
+//! The remaining live pieces — the Application Service registration that gives
+//! agents cross-signed identities, the MCP transport, and E2EE-aware mediation
+//! via `gm-e2ee` — are wired behind the `mcp` feature later.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![deny(rust_2018_idioms)]
 
-pub mod audit;
 pub mod capability;
 pub mod events;
 pub mod mcp;
 
-use crate::audit::AuditLog;
 use crate::capability::{ActionClass, CapabilityGrant};
 use crate::events::ReflectedEvent;
 use crate::mcp::{ToolCall, ToolExecutor};
+use gm_store::{audit, MemoryStore, Store};
 use std::fmt;
 
 /// The build/version string.
@@ -118,21 +118,41 @@ pub enum Outcome {
     },
 }
 
-/// The agentic gateway. Holds the pending-approval queue and the authoritative
-/// audit log; it is the single object the homeserver routes agent traffic
-/// through.
-#[derive(Debug, Default)]
-pub struct AgentGateway {
+/// The agentic gateway. Holds the pending-approval queue and persists the
+/// authoritative, tamper-evident audit log through a pluggable
+/// [`gm_store::Store`]; it is the single object the homeserver routes agent
+/// traffic through. Generic over the backend, defaulting to the in-memory store.
+#[derive(Debug)]
+pub struct AgentGateway<S: Store = MemoryStore> {
     next_request_id: u64,
     next_call_seq: u64,
     pending: Vec<PendingApproval>,
-    audit: AuditLog,
+    store: S,
 }
 
-impl AgentGateway {
-    /// Create an empty gateway.
+impl AgentGateway<MemoryStore> {
+    /// Create an empty gateway backed by an in-memory store.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_store(MemoryStore::default())
+    }
+}
+
+impl Default for AgentGateway<MemoryStore> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S: Store> AgentGateway<S> {
+    /// Create an empty gateway over a specific storage backend, so the audit
+    /// trail is persisted where the rest of the homeserver's data lives.
+    pub fn with_store(store: S) -> Self {
+        Self {
+            next_request_id: 0,
+            next_call_seq: 0,
+            pending: Vec::new(),
+            store,
+        }
     }
 
     /// Pending approvals the client should render to a human.
@@ -140,9 +160,15 @@ impl AgentGateway {
         &self.pending
     }
 
-    /// The authoritative, tamper-evident audit log (read-only).
-    pub fn audit(&self) -> &AuditLog {
-        &self.audit
+    /// Load the authoritative audit entries, oldest first (read-only).
+    pub fn audit_entries(&self) -> Vec<audit::AuditEntry> {
+        audit::entries(&self.store)
+    }
+
+    /// Verify the durable audit chain (`Ok(())` if intact, else the index of
+    /// the first corrupted entry).
+    pub fn verify_audit(&self) -> Result<(), usize> {
+        audit::verify(&self.store)
     }
 
     fn next_call_id(&mut self) -> String {
@@ -160,9 +186,10 @@ impl AgentGateway {
     ) -> Outcome {
         match grant.classify(&call.tool, &call.room) {
             ActionClass::Forbidden => {
-                self.audit.append(
+                audit::append(
+                    &mut self.store,
                     &call.agent,
-                    format!("denied_by_scope: {} in {}", call.tool, call.room),
+                    &format!("denied_by_scope: {} in {}", call.tool, call.room),
                 );
                 Outcome::Denied {
                     reason: format!("{} is not permitted in {}", call.tool, call.room),
@@ -171,14 +198,18 @@ impl AgentGateway {
             }
             ActionClass::Auto => {
                 let call_id = self.next_call_id();
-                self.audit
-                    .append(&call.agent, format!("auto_allowed: {}", call.tool));
+                audit::append(
+                    &mut self.store,
+                    &call.agent,
+                    &format!("auto_allowed: {}", call.tool),
+                );
                 let call_event =
                     ReflectedEvent::tool_call(&call_id, &call.tool, &call.args_summary);
                 let outcome = executor.execute(&call);
-                self.audit.append(
+                audit::append(
+                    &mut self.store,
                     &call.agent,
-                    format!("executed: {} ok={}", call.tool, outcome.ok),
+                    &format!("executed: {} ok={}", call.tool, outcome.ok),
                 );
                 let result_event =
                     ReflectedEvent::tool_result(&call_id, &call.tool, outcome.ok, &outcome.summary);
@@ -190,8 +221,11 @@ impl AgentGateway {
                 let call_id = self.next_call_id();
                 let request_id = self.next_request_id;
                 self.next_request_id += 1;
-                self.audit
-                    .append(&call.agent, format!("approval_requested: {}", call.tool));
+                audit::append(
+                    &mut self.store,
+                    &call.agent,
+                    &format!("approval_requested: {}", call.tool),
+                );
                 let call_event =
                     ReflectedEvent::tool_call(&call_id, &call.tool, &call.args_summary);
                 self.pending.push(PendingApproval {
@@ -224,14 +258,16 @@ impl AgentGateway {
         let receipt = ReflectedEvent::approval(&pending.call_id, decided_by, approved);
 
         if approved {
-            self.audit.append(
+            audit::append(
+                &mut self.store,
                 &pending.call.agent,
-                format!("approved_by {}: {}", decided_by, pending.call.tool),
+                &format!("approved_by {}: {}", decided_by, pending.call.tool),
             );
             let outcome = executor.execute(&pending.call);
-            self.audit.append(
+            audit::append(
+                &mut self.store,
                 &pending.call.agent,
-                format!("executed: {} ok={}", pending.call.tool, outcome.ok),
+                &format!("executed: {} ok={}", pending.call.tool, outcome.ok),
             );
             let result_event = ReflectedEvent::tool_result(
                 &pending.call_id,
@@ -243,9 +279,10 @@ impl AgentGateway {
                 events: vec![receipt, result_event],
             })
         } else {
-            self.audit.append(
+            audit::append(
+                &mut self.store,
                 &pending.call.agent,
-                format!("denied_by {}: {}", decided_by, pending.call.tool),
+                &format!("denied_by {}: {}", decided_by, pending.call.tool),
             );
             Ok(Outcome::Denied {
                 reason: format!("{} denied by {}", pending.call.tool, decided_by),
@@ -292,7 +329,7 @@ mod tests {
             other => panic!("expected Executed, got {other:?}"),
         }
         assert!(gw.pending().is_empty());
-        assert_eq!(gw.audit().verify(), Ok(()));
+        assert_eq!(gw.verify_audit(), Ok(()));
     }
 
     #[test]
@@ -313,7 +350,7 @@ mod tests {
             .expect("known request");
         assert!(matches!(resolved, Outcome::Executed { .. }));
         assert!(gw.pending().is_empty());
-        assert_eq!(gw.audit().verify(), Ok(()));
+        assert_eq!(gw.verify_audit(), Ok(()));
     }
 
     #[test]
@@ -344,8 +381,8 @@ mod tests {
             other => panic!("expected Denied, got {other:?}"),
         }
         // Refusal is still audited.
-        assert_eq!(gw.audit().entries().len(), 1);
-        assert_eq!(gw.audit().verify(), Ok(()));
+        assert_eq!(gw.audit_entries().len(), 1);
+        assert_eq!(gw.verify_audit(), Ok(()));
     }
 
     #[test]

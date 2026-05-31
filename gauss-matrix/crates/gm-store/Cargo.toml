@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "gm-store"
+description = "GaussMatrix pluggable storage abstraction: a backend-agnostic, column-family keyed store and the durable tamper-evident audit log."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "gm_store"
+
+[features]
+default = []
+# The tuned RocksDB (single-node) and distributed-KV (sharded) backends from
+# the spec land behind features later; the in-memory backend needs no deps.
+rocksdb = []
+
+[dependencies]
+
+[dev-dependencies]
