@@ -46,12 +46,14 @@
 #![warn(missing_docs)]
 #![deny(rust_2018_idioms)]
 
+pub mod appservice;
 pub mod capability;
 pub mod clock;
 pub mod events;
 pub mod mcp;
 pub mod resources;
 
+use crate::appservice::AppserviceRegistration;
 use crate::capability::{ActionClass, CapabilityGrant};
 use crate::clock::{Clock, SystemClock};
 use crate::events::ReflectedEvent;
@@ -259,6 +261,31 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
         let id = format!("call-{}", self.next_call_seq);
         self.next_call_seq += 1;
         id
+    }
+
+    /// Mediate a tool call, first confirming the calling agent is one this
+    /// Application Service actually provisioned (spec §IV.A). A call from an
+    /// identity outside the AS's namespace — unprovisioned or impersonating —
+    /// is refused (and audited) before mediation.
+    pub fn handle_managed<E: ToolExecutor>(
+        &mut self,
+        registration: &AppserviceRegistration,
+        grant: &CapabilityGrant,
+        call: ToolCall,
+        executor: &mut E,
+    ) -> Outcome {
+        if !registration.manages(call.agent.as_user_id()) {
+            audit::append(
+                &mut self.store,
+                call.agent.as_str(),
+                &format!("unmanaged_agent: {}", call.agent),
+            );
+            return Outcome::Denied {
+                reason: format!("{} is not a managed agent identity", call.agent),
+                events: Vec::new(),
+            };
+        }
+        self.handle(grant, call, executor)
     }
 
     /// Whether `agent` has exhausted its rate budget. A limit of `0` means
@@ -663,5 +690,37 @@ mod tests {
             .read_resource(&grant(), "https://example.org/secrets", &ctx)
             .unwrap_err();
         assert!(matches!(err, GatewayError::UnknownResource(_)));
+    }
+
+    #[test]
+    fn handle_managed_rejects_agents_outside_the_appservice_namespace() {
+        use crate::appservice::{AgentNamespace, AppserviceRegistration};
+        let reg = AppserviceRegistration::new(
+            "gauss-agents",
+            "gauss",
+            AgentNamespace::new("gaussian.tech", "gauss_agent_"),
+        )
+        .with_tokens("as-secret", "hs-secret");
+        let mut gw = AgentGateway::new();
+        let mut exec = EchoExecutor;
+
+        // grant()'s agent (@assistant:…) is not in the gauss_agent_ namespace.
+        assert!(matches!(
+            gw.handle_managed(&reg, &grant(), call("search"), &mut exec),
+            Outcome::Denied { .. }
+        ));
+
+        // A properly provisioned agent in the namespace is mediated normally.
+        let agent = reg.namespace.mint("assistant").unwrap();
+        let room = RoomId::parse(ROOM).unwrap();
+        let managed_grant = CapabilityGrant::deny_all(agent.clone())
+            .allow_room(room.clone())
+            .allow_tool("search", ActionClass::Auto);
+        let managed_call = ToolCall::new(agent, room, "search", "q");
+        assert!(matches!(
+            gw.handle_managed(&reg, &managed_grant, managed_call, &mut exec),
+            Outcome::Executed { .. }
+        ));
+        assert_eq!(gw.verify_audit(), Ok(()));
     }
 }

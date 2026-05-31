@@ -45,6 +45,15 @@ impl UserId {
         self.0.split_once(':').map(|(_, s)| s).unwrap_or_default()
     }
 
+    /// The localpart between `@` and `:`, e.g. `alice`.
+    pub fn localpart(&self) -> &str {
+        self.0
+            .strip_prefix('@')
+            .and_then(|rest| rest.split_once(':'))
+            .map(|(local, _)| local)
+            .unwrap_or_default()
+    }
+
     /// The full id as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -125,6 +134,7 @@ mod tests {
     fn valid_ids_parse_and_expose_server() {
         let u = UserId::parse("@alice:example.org").unwrap();
         assert_eq!(u.server_name(), "example.org");
+        assert_eq!(u.localpart(), "alice");
         assert_eq!(u.as_str(), "@alice:example.org");
 
         let r = RoomId::parse("!abc:example.org").unwrap();

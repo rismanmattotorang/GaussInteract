@@ -39,6 +39,7 @@ gauss-matrix/
     │       ├── events.rs     # m.gauss.agent.* events the gateway reflects
     │       ├── mcp.rs        # MCP tool-call ingress + ToolExecutor
     │       ├── resources.rs  # scoped room context as MCP resources (inbound)
+    │       ├── appservice.rs # AS registration + agent namespace (§IV.A)
     │       └── clock.rs      # Clock abstraction for rate limiting
     ├── gm-store/         # pluggable storage abstraction (§III.C)
     │   └── src/
@@ -82,6 +83,13 @@ timeline resource per granted room and no others, and `read_resource` enforces
 the room scope — a request for a room outside the grant is denied (and audited)
 before any context is read. An agent can read exactly what it was granted, the
 same trust-boundary invariant as the write path.
+
+Agents are **provisioned, not ad-hoc** (`appservice.rs`, §IV.A): an
+`AppserviceRegistration` owns an exclusive agent namespace
+(`@gauss_agent_…:server`) and mints cross-signed agent identities within it.
+`AgentGateway::handle_managed` refuses (and audits) any tool call from an
+identity the Application Service did not provision, so an unprovisioned or
+impersonating principal cannot act even with a forged grant.
 
 ## Build & test
 
