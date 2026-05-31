@@ -50,11 +50,15 @@ pub mod capability;
 pub mod clock;
 pub mod events;
 pub mod mcp;
+pub mod resources;
 
 use crate::capability::{ActionClass, CapabilityGrant};
 use crate::clock::{Clock, SystemClock};
 use crate::events::ReflectedEvent;
 use crate::mcp::{ToolCall, ToolExecutor};
+use crate::resources::{
+    render_timeline, room_from_uri, room_resource_uri, McpResource, ResourceContents, RoomContext,
+};
 use gm_store::{audit, MemoryStore, Store};
 use std::fmt;
 
@@ -71,6 +75,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub enum GatewayError {
     /// No pending approval matches the given request id.
     UnknownRequest(u64),
+    /// The agent's grant does not permit the requested resource.
+    ResourceAccessDenied(String),
+    /// The URI is not a resource this gateway exposes.
+    UnknownResource(String),
 }
 
 impl fmt::Display for GatewayError {
@@ -78,6 +86,12 @@ impl fmt::Display for GatewayError {
         match self {
             GatewayError::UnknownRequest(id) => {
                 write!(f, "no pending approval with id {id}")
+            }
+            GatewayError::ResourceAccessDenied(uri) => {
+                write!(f, "resource access denied: {uri}")
+            }
+            GatewayError::UnknownResource(uri) => {
+                write!(f, "unknown resource: {uri}")
             }
         }
     }
@@ -188,6 +202,57 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
     /// the first corrupted entry).
     pub fn verify_audit(&self) -> Result<(), usize> {
         audit::verify(&self.store)
+    }
+
+    /// List the MCP resources an agent may read — one timeline resource per
+    /// room in its grant, and no others (spec §IV.B, inbound half).
+    pub fn list_resources(&mut self, grant: &CapabilityGrant) -> Vec<McpResource> {
+        audit::append(
+            &mut self.store,
+            grant.agent.as_str(),
+            &format!("resources_listed: {}", grant.accessible_rooms.len()),
+        );
+        grant
+            .accessible_rooms
+            .iter()
+            .map(|room| McpResource {
+                uri: room_resource_uri(room),
+                name: format!("Timeline of {room}"),
+                mime_type: "text/plain".to_owned(),
+            })
+            .collect()
+    }
+
+    /// Read a room resource for an agent, enforcing its room scope. A request
+    /// for a room outside the grant is denied (and audited) before any context
+    /// is read; the agent can only ever see what it was granted.
+    pub fn read_resource<R: RoomContext>(
+        &mut self,
+        grant: &CapabilityGrant,
+        uri: &str,
+        ctx: &R,
+    ) -> Result<ResourceContents, GatewayError> {
+        let room =
+            room_from_uri(uri).ok_or_else(|| GatewayError::UnknownResource(uri.to_owned()))?;
+        if !grant.permits_room(&room) {
+            audit::append(
+                &mut self.store,
+                grant.agent.as_str(),
+                &format!("resource_denied: {uri}"),
+            );
+            return Err(GatewayError::ResourceAccessDenied(uri.to_owned()));
+        }
+        let text = render_timeline(&ctx.messages(&room));
+        audit::append(
+            &mut self.store,
+            grant.agent.as_str(),
+            &format!("resource_read: {uri}"),
+        );
+        Ok(ResourceContents {
+            uri: uri.to_owned(),
+            mime_type: "text/plain".to_owned(),
+            text,
+        })
     }
 
     fn next_call_id(&mut self) -> String {
@@ -544,5 +609,59 @@ mod tests {
             Outcome::Executed { .. }
         ));
         assert_eq!(gw.verify_audit(), Ok(()));
+    }
+
+    #[test]
+    fn list_resources_exposes_only_granted_rooms() {
+        let mut gw = AgentGateway::new();
+        let resources = gw.list_resources(&grant());
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].uri, "gauss://room/!room:gaussian.tech");
+    }
+
+    #[test]
+    fn read_resource_returns_scoped_timeline_and_audits() {
+        use crate::resources::{MapRoomContext, Message};
+        let room = RoomId::parse(ROOM).unwrap();
+        let ctx = MapRoomContext::default().with_messages(
+            &room,
+            vec![
+                Message::new("@a:gaussian.tech", "hello"),
+                Message::new(AGENT, "on it"),
+            ],
+        );
+        let mut gw = AgentGateway::new();
+        let contents = gw
+            .read_resource(&grant(), &room_resource_uri(&room), &ctx)
+            .expect("granted room");
+        assert!(contents.text.contains("hello"));
+        assert_eq!(contents.mime_type, "text/plain");
+        assert_eq!(gw.verify_audit(), Ok(()));
+    }
+
+    #[test]
+    fn read_resource_denies_rooms_outside_the_grant() {
+        use crate::resources::MapRoomContext;
+        let secret = RoomId::parse("!secret:gaussian.tech").unwrap();
+        let ctx = MapRoomContext::default();
+        let mut gw = AgentGateway::new();
+        let err = gw
+            .read_resource(&grant(), &room_resource_uri(&secret), &ctx)
+            .unwrap_err();
+        assert!(matches!(err, GatewayError::ResourceAccessDenied(_)));
+        // The denial is recorded.
+        assert_eq!(gw.audit_entries().len(), 1);
+        assert_eq!(gw.verify_audit(), Ok(()));
+    }
+
+    #[test]
+    fn read_resource_rejects_unknown_uris() {
+        use crate::resources::MapRoomContext;
+        let ctx = MapRoomContext::default();
+        let mut gw = AgentGateway::new();
+        let err = gw
+            .read_resource(&grant(), "https://example.org/secrets", &ctx)
+            .unwrap_err();
+        assert!(matches!(err, GatewayError::UnknownResource(_)));
     }
 }

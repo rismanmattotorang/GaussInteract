@@ -34,10 +34,12 @@ gauss-matrix/
 └── crates/
     ├── gm-agent/         # the agentic AI gateway
     │   └── src/
-    │       ├── lib.rs        # AgentGateway: the mediation pipeline
+    │       ├── lib.rs        # AgentGateway: mediation pipeline + resource access
     │       ├── capability.rs # CapabilityGrant + classify (auto/review/forbidden)
     │       ├── events.rs     # m.gauss.agent.* events the gateway reflects
-    │       └── mcp.rs        # MCP tool-call ingress + ToolExecutor
+    │       ├── mcp.rs        # MCP tool-call ingress + ToolExecutor
+    │       ├── resources.rs  # scoped room context as MCP resources (inbound)
+    │       └── clock.rs      # Clock abstraction for rate limiting
     ├── gm-store/         # pluggable storage abstraction (§III.C)
     │   └── src/
     │       ├── lib.rs        # Store trait + per-domain column families (cf::*)
@@ -73,6 +75,13 @@ Every branch appends to a **durable, hash-chained, tamper-evident audit log**
 detects retroactive edits (§IV.D), and the reflected events carry exactly the
 content the client reads (`call_id`, `tool`, `args_summary`, `ok`, `summary`) —
 so server and client already agree on the wire shape.
+
+The gateway is bidirectional. Inbound (`resources.rs`), it exposes **scoped**
+room context to an agent as MCP resources: `list_resources` returns one
+timeline resource per granted room and no others, and `read_resource` enforces
+the room scope — a request for a room outside the grant is denied (and audited)
+before any context is read. An agent can read exactly what it was granted, the
+same trust-boundary invariant as the write path.
 
 ## Build & test
 
