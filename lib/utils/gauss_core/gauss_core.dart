@@ -193,3 +193,166 @@ class GaussCoreStub implements GaussCore {
   static int _digest(String agent, String event, int prevHash) =>
       Object.hash(agent, event, prevHash);
 }
+
+/// The wire string for a classification, matching the GaussMatrix gateway
+/// (`gm-agent`'s `ActionClass`).
+extension GaussActionClassWire on GaussActionClass {
+  /// `"auto"` / `"review"` / `"forbidden"`.
+  String get wire => switch (this) {
+    GaussActionClass.auto => 'auto',
+    GaussActionClass.review => 'review',
+    GaussActionClass.forbidden => 'forbidden',
+  };
+}
+
+/// Parse a classification from its wire string, or null if unknown.
+GaussActionClass? gaussActionClassFromWire(String value) => switch (value) {
+  'auto' => GaussActionClass.auto,
+  'review' => GaussActionClass.review,
+  'forbidden' => GaussActionClass.forbidden,
+  _ => null,
+};
+
+/// An agent's capability grant, parsed from the `m.gauss.agent.capability`
+/// room-state content the GaussMatrix gateway publishes (§IV.C).
+///
+/// This mirrors the server's `CapabilityGrant`: the client decodes the same
+/// content, so it can show a supervisor what an agent is allowed to do and
+/// preview how a tool call would be classified — without trusting anything it
+/// cannot validate.
+class GaussCapabilityGrant {
+  const GaussCapabilityGrant({
+    required this.agent,
+    required this.allowedTools,
+    required this.accessibleRooms,
+    required this.rateLimitPerMin,
+    required this.defaultClass,
+    required this.overrides,
+  });
+
+  /// The agent this grant scopes.
+  final String agent;
+
+  /// Tools the agent may call at all.
+  final List<String> allowedTools;
+
+  /// Rooms the agent may access.
+  final List<String> accessibleRooms;
+
+  /// Maximum tool calls per minute (0 = unlimited).
+  final int rateLimitPerMin;
+
+  /// Classification for tools without an explicit override.
+  final GaussActionClass defaultClass;
+
+  /// Per-tool classification overrides.
+  final Map<String, GaussActionClass> overrides;
+
+  /// Decode from `m.gauss.agent.capability` event content. Returns null if the
+  /// content is malformed — the same fields the server re-validates (§IV.C).
+  static GaussCapabilityGrant? fromContent(Map<String, Object?> content) {
+    final Object? agent = content['agent'];
+    final Object? rate = content['rate_limit_per_min'];
+    final Object? defaultClassValue = content['default_class'];
+    if (agent is! String || rate is! int || defaultClassValue is! String) {
+      return null;
+    }
+    final defaultClass = gaussActionClassFromWire(defaultClassValue);
+    final allowedTools = _stringList(content['allowed_tools']);
+    final accessibleRooms = _stringList(content['accessible_rooms']);
+    final Object? overridesValue = content['overrides'];
+    if (defaultClass == null ||
+        allowedTools == null ||
+        accessibleRooms == null ||
+        overridesValue is! List) {
+      return null;
+    }
+    final overrides = <String, GaussActionClass>{};
+    for (final Object? entry in overridesValue) {
+      if (entry is! List || entry.length != 2) return null;
+      final Object? tool = entry[0];
+      final Object? classValue = entry[1];
+      if (tool is! String || classValue is! String) return null;
+      final cls = gaussActionClassFromWire(classValue);
+      if (cls == null) return null;
+      overrides[tool] = cls;
+    }
+    return GaussCapabilityGrant(
+      agent: agent,
+      allowedTools: allowedTools,
+      accessibleRooms: accessibleRooms,
+      rateLimitPerMin: rate,
+      defaultClass: defaultClass,
+      overrides: overrides,
+    );
+  }
+
+  /// Classify a tool invocation in a room, mirroring the gateway. A tool or
+  /// room outside the grant resolves to [GaussActionClass.forbidden].
+  GaussActionClass classify(String tool, String room) {
+    if (!accessibleRooms.contains(room) || !allowedTools.contains(tool)) {
+      return GaussActionClass.forbidden;
+    }
+    return overrides[tool] ?? defaultClass;
+  }
+}
+
+/// One structured audit record as emitted by GaussMatrix `gm-obs`
+/// (`AuditRecord`), for the supervisor audit view.
+class GaussAuditRecord {
+  const GaussAuditRecord({
+    required this.seq,
+    required this.actor,
+    required this.action,
+    required this.prevHash,
+    required this.hash,
+  });
+
+  /// Position in the chain (0-based, oldest first).
+  final int seq;
+
+  /// The principal the entry concerns.
+  final String actor;
+
+  /// The recorded gateway decision/event.
+  final String action;
+
+  /// Hash committing to the previous entry.
+  final int prevHash;
+
+  /// Hash of this entry.
+  final int hash;
+
+  /// Decode from the JSON object the SIEM stream emits, or null if malformed.
+  static GaussAuditRecord? fromJson(Map<String, Object?> json) {
+    final Object? seq = json['seq'];
+    final Object? actor = json['actor'];
+    final Object? action = json['action'];
+    final Object? prevHash = json['prev_hash'];
+    final Object? hash = json['hash'];
+    if (seq is! int ||
+        actor is! String ||
+        action is! String ||
+        prevHash is! int ||
+        hash is! int) {
+      return null;
+    }
+    return GaussAuditRecord(
+      seq: seq,
+      actor: actor,
+      action: action,
+      prevHash: prevHash,
+      hash: hash,
+    );
+  }
+}
+
+List<String>? _stringList(Object? value) {
+  if (value is! List) return null;
+  final result = <String>[];
+  for (final Object? element in value) {
+    if (element is! String) return null;
+    result.add(element);
+  }
+  return result;
+}
