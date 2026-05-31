@@ -111,6 +111,13 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+`crates/gm-agent/tests/end_to_end.rs` is a worked pass over the whole agentic
+surface through the public API: provision an agent in the AS namespace, grant it
+via `m.gauss.agent.capability` content, expose scoped resources, mediate auto /
+review-then-approve / forbidden / unmanaged tool calls, then verify the
+tamper-evident audit chain, stream it to a SIEM, and assert the Prometheus
+metrics — the same loop the GaussInteract client renders.
+
 ## Remaining crates (spec §III.B)
 
 `gm-http` · `gm-api` · `gm-svc` · `gm-stateres` · `gm-fed` · `gm-e2ee` ·

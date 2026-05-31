@@ -28,3 +28,5 @@ gm-util = { path = "../gm-util" }
 # Application Service client, an MCP transport, tokio, serde, thiserror.
 
 [dev-dependencies]
+# Integration tests in tests/ construct typed identifiers directly.
+gm-util = { path = "../gm-util" }

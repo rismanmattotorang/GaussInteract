@@ -222,6 +222,20 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
         audit::verify(&self.store)
     }
 
+    /// Stream this gateway's durable audit log to a SIEM sink as structured
+    /// records (spec §VIII.A), returning the number emitted.
+    pub fn stream_audit<K: gm_obs::SiemSink>(&self, sink: &mut K) -> usize {
+        gm_obs::stream_audit(&self.store, sink)
+    }
+
+    /// The audit log as structured SIEM records — a convenience over
+    /// [`Self::stream_audit`] for callers that just want the records.
+    pub fn audit_records(&self) -> Vec<gm_obs::AuditRecord> {
+        let mut sink = gm_obs::VecSink::default();
+        gm_obs::stream_audit(&self.store, &mut sink);
+        sink.records
+    }
+
     /// List the MCP resources an agent may read — one timeline resource per
     /// room in its grant, and no others (spec §IV.B, inbound half).
     pub fn list_resources(&mut self, grant: &CapabilityGrant) -> Vec<McpResource> {
