@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import 'package:gaussinteract/config/setting_keys.dart';
+import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
 import 'package:matrix/matrix.dart';
 
 extension VisibleInGuiExtension on List<Event> {
@@ -39,8 +40,18 @@ extension IsStateExtension on Event {
       !{EventTypes.Reaction, EventTypes.Redaction}.contains(type) &&
       // if we enabled to hide all redacted events, don't show those
       (!AppSettings.hideRedactedEvents.value || !redacted) &&
-      // if we enabled to hide all unknown events, don't show those
-      (!AppSettings.hideUnknownEvents.value || isEventTypeKnown);
+      // if we enabled to hide all unknown events, don't show those —
+      // but GaussInteract's own agent events are first-class and always shown
+      (!AppSettings.hideUnknownEvents.value ||
+          isEventTypeKnown ||
+          isGaussAgentEvent);
+
+  /// Whether this is a first-class GaussInteract agent event (§IV.B): an
+  /// inline tool call or result that must remain visible in the timeline.
+  bool get isGaussAgentEvent => {
+    GaussAgentEvents.toolCall,
+    GaussAgentEvents.toolResult,
+  }.contains(type);
 
   bool get isState => !{
     EventTypes.Message,

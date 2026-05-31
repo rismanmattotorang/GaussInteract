@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:gaussinteract/config/themes.dart';
+import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/agent/agent_approval_card.dart';
 import 'package:gaussinteract/pages/agent/agent_audit_view.dart';
 import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
@@ -79,19 +80,20 @@ class _AgentConsoleState extends State<AgentConsole> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final l10n = L10n.of(context);
     final pending = _core.pendingApprovals;
 
     return Scaffold(
       appBar: AppBar(
         leading: BackButton(onPressed: () => context.go('/')),
-        title: const Text('Agent console'),
+        title: Text(l10n.agentConsoleTitle),
         automaticallyImplyLeading: !FluffyThemes.isColumnMode(context),
         centerTitle: FluffyThemes.isColumnMode(context),
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _simulateToolCall,
         icon: const Icon(Icons.bolt_outlined),
-        label: const Text('Simulate tool call'),
+        label: Text(l10n.agentSimulateToolCall),
       ),
       body: Center(
         child: ConstrainedBox(
@@ -101,11 +103,10 @@ class _AgentConsoleState extends State<AgentConsole> {
           child: ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              Text('Timeline', style: theme.textTheme.titleMedium),
+              Text(l10n.agentTimeline, style: theme.textTheme.titleMedium),
               const SizedBox(height: 4),
               Text(
-                'Agent actions classified as “review” wait here for a human '
-                'decision. Every choice is written to the audit log below.',
+                l10n.agentTimelineDescription,
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
@@ -154,8 +155,7 @@ class _EmptyTimeline extends StatelessWidget {
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                'No pending approvals. Agents are operating within their '
-                'auto-approved capabilities.',
+                L10n.of(context).agentNoPendingApprovals,
                 style: theme.textTheme.bodyMedium,
               ),
             ),

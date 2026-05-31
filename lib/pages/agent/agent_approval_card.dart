@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:gaussinteract/config/app_config.dart';
+import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
 
 /// An inline, first-class timeline item rendering a human-in-the-loop approval
@@ -34,6 +35,7 @@ class AgentApprovalCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+    final l10n = L10n.of(context);
 
     return Card(
       elevation: 0,
@@ -69,7 +71,7 @@ class AgentApprovalCard extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                       ),
                       Text(
-                        'wants to run a tool',
+                        l10n.agentWantsToRunATool,
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: colors.onSurfaceVariant,
                         ),
@@ -78,7 +80,7 @@ class AgentApprovalCard extends StatelessWidget {
                   ),
                 ),
                 _Badge(
-                  label: 'Needs approval',
+                  label: l10n.agentNeedsApproval,
                   color: colors.tertiary,
                   onColor: colors.onTertiary,
                 ),
@@ -122,14 +124,14 @@ class AgentApprovalCard extends StatelessWidget {
                 OutlinedButton.icon(
                   onPressed: onDeny,
                   icon: const Icon(Icons.close),
-                  label: const Text('Deny'),
+                  label: Text(l10n.agentDeny),
                   style: OutlinedButton.styleFrom(foregroundColor: colors.error),
                 ),
                 const SizedBox(width: 12),
                 FilledButton.icon(
                   onPressed: onApprove,
                   icon: const Icon(Icons.check),
-                  label: const Text('Approve'),
+                  label: Text(l10n.agentApprove),
                 ),
               ],
             ),

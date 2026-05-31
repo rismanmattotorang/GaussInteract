@@ -12,6 +12,7 @@ import 'package:gaussinteract/pages/chat/events/video_player.dart';
 import 'package:gaussinteract/pages/image_viewer/image_viewer.dart';
 import 'package:gaussinteract/utils/adaptive_bottom_sheet.dart';
 import 'package:gaussinteract/utils/date_time_extension.dart';
+import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
 import 'package:gaussinteract/utils/matrix_sdk_extensions/matrix_locals.dart';
 import 'package:gaussinteract/widgets/avatar.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
@@ -24,6 +25,7 @@ import '../../../config/app_config.dart';
 import '../../../utils/event_checkbox_extension.dart';
 import '../../../utils/platform_infos.dart';
 import '../../../utils/url_launcher.dart';
+import 'agent_event_content.dart';
 import 'audio_player.dart';
 import 'cute_events.dart';
 import 'html_message.dart';
@@ -319,6 +321,21 @@ class MessageContent extends StatelessWidget {
               fontSize: fontSize,
             );
           },
+        );
+      case GaussAgentEvents.toolCall:
+      case GaussAgentEvents.toolResult:
+        if (event.redacted) {
+          return RedactionWidget(
+            event: event,
+            buttonTextColor: buttonTextColor,
+            onInfoTab: onInfoTab,
+            fontSize: fontSize,
+          );
+        }
+        return AgentEventContent(
+          event: event,
+          textColor: textColor,
+          fontSize: fontSize,
         );
       default:
         return FutureBuilder<User?>(

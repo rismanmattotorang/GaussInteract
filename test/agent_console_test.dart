@@ -5,10 +5,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/agent/agent_console.dart';
 
 void main() {
-  Widget host() => const MaterialApp(home: AgentConsole());
+  Widget host() => MaterialApp(
+    localizationsDelegates: L10n.localizationsDelegates,
+    supportedLocales: L10n.supportedLocales,
+    locale: const Locale('en'),
+    home: const AgentConsole(),
+  );
 
   group('AgentConsole', () {
     testWidgets('renders seeded approval cards and the audit view', (

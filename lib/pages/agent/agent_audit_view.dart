@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:gaussinteract/config/app_config.dart';
+import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
 
 /// Read-only view of the hash-chained, tamper-evident agent audit log
@@ -28,6 +29,7 @@ class AgentAuditView extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+    final l10n = L10n.of(context);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -38,7 +40,7 @@ class AgentAuditView extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                'Tamper-evident audit log',
+                l10n.agentAuditLogTitle,
                 style: theme.textTheme.titleMedium,
               ),
             ),
@@ -50,7 +52,7 @@ class AgentAuditView extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 12),
             child: Text(
-              'No agent activity recorded yet.',
+              l10n.agentAuditEmpty,
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: colors.onSurfaceVariant,
               ),
@@ -133,6 +135,7 @@ class _IntegrityBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+    final l10n = L10n.of(context);
     final color = verified ? Colors.green : colors.error;
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -144,7 +147,7 @@ class _IntegrityBadge extends StatelessWidget {
         ),
         const SizedBox(width: 4),
         Text(
-          verified ? 'Verified' : 'Tampered',
+          verified ? l10n.agentAuditVerified : l10n.agentAuditTampered,
           style: theme.textTheme.labelMedium?.copyWith(
             color: color,
             fontWeight: FontWeight.bold,

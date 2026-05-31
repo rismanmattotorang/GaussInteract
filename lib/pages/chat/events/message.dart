@@ -7,6 +7,7 @@ import 'dart:ui' as ui;
 
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
+import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/adaptive_bottom_sheet.dart';
@@ -90,6 +91,8 @@ class Message extends StatelessWidget {
       EventTypes.Encrypted,
       EventTypes.CallInvite,
       PollEventContent.startType,
+      GaussAgentEvents.toolCall,
+      GaussAgentEvents.toolResult,
     }.contains(event.type)) {
       if (event.type.startsWith('m.call.')) {
         return const SizedBox.shrink();
