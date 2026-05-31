@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=GaussInteract
+GenericName=Matrix Client
+Comment=Enterprise, agentic-AI-ready secure messaging
+Exec=gaussinteract
+Icon=${SNAP}/meta/gui/gaussinteract.png
+Terminal=false
+Type=Application
+Categories=Network;Chat;InstantMessaging;

@@ -1,0 +1,982 @@
+// SPDX-FileCopyrightText: 2019-Present Christian Kußowski
+// SPDX-FileCopyrightText: 2019-Present Contributors to FluffyChat
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+import 'dart:ui' as ui;
+
+import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
+import 'package:gaussinteract/config/setting_keys.dart';
+import 'package:gaussinteract/config/themes.dart';
+import 'package:gaussinteract/l10n/l10n.dart';
+import 'package:gaussinteract/utils/adaptive_bottom_sheet.dart';
+import 'package:gaussinteract/utils/date_time_extension.dart';
+import 'package:gaussinteract/utils/file_description.dart';
+import 'package:gaussinteract/utils/matrix_sdk_extensions/matrix_locals.dart';
+import 'package:gaussinteract/utils/string_color.dart';
+import 'package:gaussinteract/widgets/avatar.dart';
+import 'package:gaussinteract/widgets/matrix.dart';
+import 'package:gaussinteract/widgets/member_actions_popup_menu_button.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:matrix/matrix.dart';
+import 'package:swipe_to_action/swipe_to_action.dart';
+
+import '../../../config/app_config.dart';
+import 'message_content.dart';
+import 'message_reactions.dart';
+import 'reply_content.dart';
+import 'state_message.dart';
+
+class Message extends StatelessWidget {
+  final Event event;
+  final Event? nextEvent;
+  final Event? previousEvent;
+  final bool displayReadMarker;
+  final void Function(Event) onSelect;
+  final void Function(Event) onInfoTab;
+  final void Function(String) scrollToEventId;
+  final void Function() onSwipe;
+  final void Function() onMention;
+  final void Function() onEdit;
+  final void Function(String eventId)? enterThread;
+  final bool longPressSelect;
+  final bool selected;
+  final bool singleSelected;
+  final Timeline timeline;
+  final bool highlightMarker;
+  final bool animateIn;
+  final bool wallpaperMode;
+  final ScrollController scrollController;
+  final List<Color> colors;
+  final void Function()? onExpand;
+  final bool isCollapsed;
+  final Set<String> bigEmojis;
+
+  const Message(
+    this.event, {
+    this.nextEvent,
+    this.previousEvent,
+    this.displayReadMarker = false,
+    this.longPressSelect = false,
+    required this.bigEmojis,
+    required this.onSelect,
+    required this.onInfoTab,
+    required this.scrollToEventId,
+    required this.onSwipe,
+    this.selected = false,
+    required this.onEdit,
+    required this.singleSelected,
+    required this.timeline,
+    this.highlightMarker = false,
+    this.animateIn = false,
+    this.wallpaperMode = false,
+    required this.onMention,
+    required this.scrollController,
+    required this.colors,
+    this.onExpand,
+    required this.enterThread,
+    this.isCollapsed = false,
+    super.key,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    if (!{
+      EventTypes.Message,
+      EventTypes.Sticker,
+      EventTypes.Encrypted,
+      EventTypes.CallInvite,
+      PollEventContent.startType,
+    }.contains(event.type)) {
+      if (event.type.startsWith('m.call.')) {
+        return const SizedBox.shrink();
+      }
+      return StateMessage(event, onExpand: onExpand, isCollapsed: isCollapsed);
+    }
+
+    if (event.type == EventTypes.Message &&
+        event.messageType == EventTypes.KeyVerificationRequest) {
+      return StateMessage(event);
+    }
+
+    final client = Matrix.of(context).client;
+    final ownMessage = event.senderId == client.userID;
+    final alignment = ownMessage ? Alignment.topRight : Alignment.topLeft;
+
+    var color = theme.colorScheme.surfaceContainerHigh;
+    final displayTime =
+        event.type == EventTypes.RoomCreate ||
+        nextEvent == null ||
+        !event.originServerTs.sameEnvironment(nextEvent!.originServerTs);
+    final nextEventSameSender =
+        nextEvent != null &&
+        {
+          EventTypes.Message,
+          EventTypes.Sticker,
+          EventTypes.Encrypted,
+        }.contains(nextEvent!.type) &&
+        nextEvent!.senderId == event.senderId &&
+        !displayTime;
+
+    final previousEventSameSender =
+        previousEvent != null &&
+        {
+          EventTypes.Message,
+          EventTypes.Sticker,
+          EventTypes.Encrypted,
+        }.contains(previousEvent!.type) &&
+        previousEvent!.senderId == event.senderId &&
+        previousEvent!.originServerTs.sameEnvironment(event.originServerTs);
+
+    final textColor = ownMessage
+        ? theme.onBubbleColor
+        : theme.colorScheme.onSurface;
+
+    final linkColor = ownMessage
+        ? theme.brightness == Brightness.light
+              ? theme.colorScheme.primaryFixed
+              : theme.colorScheme.onTertiaryContainer
+        : theme.colorScheme.primary;
+
+    final rowMainAxisAlignment = ownMessage
+        ? MainAxisAlignment.end
+        : MainAxisAlignment.start;
+
+    final displayEvent = event.getDisplayEvent(timeline);
+    const hardCorner = Radius.circular(4);
+    const roundedCorner = Radius.circular(AppConfig.borderRadius);
+    final borderRadius = BorderRadius.only(
+      topLeft: !ownMessage && nextEventSameSender ? hardCorner : roundedCorner,
+      topRight: ownMessage && nextEventSameSender ? hardCorner : roundedCorner,
+      bottomLeft: !ownMessage && previousEventSameSender
+          ? hardCorner
+          : roundedCorner,
+      bottomRight: ownMessage && previousEventSameSender
+          ? hardCorner
+          : roundedCorner,
+    );
+    final noBubble =
+        ({
+          MessageTypes.Video,
+          MessageTypes.Image,
+          MessageTypes.Sticker,
+        }.contains(event.messageType) &&
+        event.fileDescription == null &&
+        !event.redacted);
+
+    if (ownMessage) {
+      color = displayEvent.status.isError
+          ? Colors.redAccent
+          : theme.bubbleColor;
+    }
+
+    final sentReactions = <String>{};
+    if (singleSelected) {
+      sentReactions.addAll(
+        event
+            .aggregatedEvents(timeline, RelationshipTypes.reaction)
+            .where(
+              (event) =>
+                  event.senderId == event.room.client.userID &&
+                  event.type == 'm.reaction',
+            )
+            .map(
+              (event) => event.content
+                  .tryGetMap<String, Object?>('m.relates_to')
+                  ?.tryGet<String>('key'),
+            )
+            .whereType<String>(),
+      );
+    }
+
+    final hasReactions = event.hasAggregatedEvents(
+      timeline,
+      RelationshipTypes.reaction,
+    );
+
+    final threadChildren = event.aggregatedEvents(
+      timeline,
+      RelationshipTypes.thread,
+    );
+
+    final showReactionPicker =
+        singleSelected && event.room.canSendDefaultMessages;
+
+    final enterThread = this.enterThread;
+    final sender = event.senderFromMemoryOrFallback;
+
+    return _AnimateIn(
+      animateIn: animateIn,
+      child: Center(
+        child: Swipeable(
+          key: ValueKey(event.eventId),
+          background: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12.0),
+            child: Center(child: Icon(Icons.check_outlined)),
+          ),
+          direction: AppSettings.swipeRightToLeftToReply.value
+              ? SwipeDirection.endToStart
+              : SwipeDirection.startToEnd,
+          onSwipe: (_) => onSwipe(),
+          child: Container(
+            constraints: const BoxConstraints(
+              maxWidth: FluffyThemes.maxTimelineWidth,
+            ),
+            padding: EdgeInsets.only(
+              left: 8.0,
+              right: 8.0,
+              top: nextEventSameSender ? 1.0 : 4.0,
+              bottom: previousEventSameSender ? 1.0 : 4.0,
+            ),
+            child: Column(
+              mainAxisSize: .min,
+              crossAxisAlignment: ownMessage ? .end : .start,
+              children: <Widget>[
+                if (displayTime || selected)
+                  Padding(
+                    padding: displayTime
+                        ? const EdgeInsets.symmetric(vertical: 8.0)
+                        : EdgeInsets.zero,
+                    child: Center(
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 4.0),
+                        child: Material(
+                          borderRadius: BorderRadius.circular(
+                            AppConfig.borderRadius * 2,
+                          ),
+                          color: theme.colorScheme.surface.withAlpha(128),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8.0,
+                              vertical: 2.0,
+                            ),
+                            child: Text(
+                              event.originServerTs.localizedTime(context),
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: theme.colorScheme.secondary,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Positioned(
+                      top: 0,
+                      bottom: 0,
+                      left: 0,
+                      right: 0,
+                      child: InkWell(
+                        hoverColor: longPressSelect ? Colors.transparent : null,
+                        enableFeedback: !selected,
+                        onTap: longPressSelect ? null : () => onSelect(event),
+                        borderRadius: BorderRadius.circular(
+                          AppConfig.borderRadius / 2,
+                        ),
+                        child: Material(
+                          borderRadius: BorderRadius.circular(
+                            AppConfig.borderRadius / 2,
+                          ),
+                          color: selected || highlightMarker
+                              ? theme.colorScheme.secondaryContainer.withAlpha(
+                                  128,
+                                )
+                              : Colors.transparent,
+                        ),
+                      ),
+                    ),
+                    Row(
+                      crossAxisAlignment: .start,
+                      mainAxisAlignment: rowMainAxisAlignment,
+                      children: [
+                        if (longPressSelect && !event.redacted)
+                          SizedBox(
+                            height: 32,
+                            width: Avatar.defaultSize,
+                            child: IconButton(
+                              padding: EdgeInsets.zero,
+                              tooltip: L10n.of(context).select,
+                              icon: Icon(
+                                selected
+                                    ? Icons.check_circle
+                                    : Icons.circle_outlined,
+                              ),
+                              onPressed: () => onSelect(event),
+                            ),
+                          )
+                        else if (nextEventSameSender || ownMessage)
+                          SizedBox(
+                            width: Avatar.defaultSize,
+                            child: Center(
+                              child: SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: event.status == EventStatus.error
+                                    ? const Icon(Icons.error, color: Colors.red)
+                                    : null,
+                              ),
+                            ),
+                          )
+                        else
+                          FutureBuilder<User?>(
+                            future: event.fetchSenderUser(),
+                            builder: (context, snapshot) {
+                              final user = snapshot.data ?? sender;
+                              return Avatar(
+                                mxContent: user.avatarUrl,
+                                name: user.calcDisplayname(),
+                                onTap: () => showMemberActionsPopupMenu(
+                                  context: context,
+                                  user: user,
+                                  onMention: onMention,
+                                ),
+                                presenceUserId: user.stateKey,
+                                presenceBackgroundColor: wallpaperMode
+                                    ? Colors.transparent
+                                    : null,
+                              );
+                            },
+                          ),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: .start,
+                            mainAxisSize: .min,
+                            children: [
+                              if (!nextEventSameSender)
+                                Padding(
+                                  padding: const EdgeInsets.only(
+                                    left: 8.0,
+                                    bottom: 4,
+                                  ),
+                                  child: ownMessage || event.room.isDirectChat
+                                      ? const SizedBox(height: 12)
+                                      : Row(
+                                          children: [
+                                            if (sender.powerLevel.role !=
+                                                PowerLevelRole.user)
+                                              Padding(
+                                                padding: const EdgeInsets.only(
+                                                  right: 2.0,
+                                                ),
+                                                child: Icon(
+                                                  sender.powerLevel.role ==
+                                                          PowerLevelRole
+                                                              .moderator
+                                                      ? Icons
+                                                            .add_moderator_outlined
+                                                      : Icons
+                                                            .admin_panel_settings,
+                                                  size: 14,
+                                                  color: theme
+                                                      .colorScheme
+                                                      .onPrimaryContainer,
+                                                ),
+                                              ),
+                                            Expanded(
+                                              child: FutureBuilder<User?>(
+                                                future: event.fetchSenderUser(),
+                                                builder: (context, snapshot) {
+                                                  final displayname =
+                                                      snapshot.data
+                                                          ?.calcDisplayname() ??
+                                                      sender.calcDisplayname();
+                                                  return Text(
+                                                    displayname,
+                                                    style: TextStyle(
+                                                      fontSize: 11,
+                                                      fontWeight:
+                                                          FontWeight.bold,
+                                                      color:
+                                                          (theme.brightness ==
+                                                              Brightness.light
+                                                          ? displayname.color
+                                                          : displayname
+                                                                .lightColorText),
+                                                      shadows: !wallpaperMode
+                                                          ? null
+                                                          : [
+                                                              const Shadow(
+                                                                offset: Offset(
+                                                                  0.0,
+                                                                  0.0,
+                                                                ),
+                                                                blurRadius: 3,
+                                                                color: Colors
+                                                                    .black,
+                                                              ),
+                                                            ],
+                                                    ),
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                  );
+                                                },
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                ),
+                              Container(
+                                alignment: alignment,
+                                padding: const EdgeInsets.only(left: 8),
+                                child: GestureDetector(
+                                  onLongPress: longPressSelect
+                                      ? null
+                                      : () {
+                                          HapticFeedback.heavyImpact();
+                                          onSelect(event);
+                                        },
+                                  child: AnimatedOpacity(
+                                    duration: FluffyThemes.animationDuration,
+                                    curve: FluffyThemes.animationCurve,
+                                    opacity:
+                                        event.status.isSending ||
+                                            event.type == EventTypes.Encrypted
+                                        ? 0.5
+                                        : 1,
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        color: noBubble
+                                            ? Colors.transparent
+                                            : color,
+                                        borderRadius: borderRadius,
+                                      ),
+                                      clipBehavior: Clip.antiAlias,
+                                      child: BubbleBackground(
+                                        colors: colors,
+                                        ignore:
+                                            noBubble ||
+                                            !ownMessage ||
+                                            MediaQuery.highContrastOf(context),
+                                        scrollController: scrollController,
+                                        child: Container(
+                                          decoration: BoxDecoration(
+                                            borderRadius: BorderRadius.circular(
+                                              AppConfig.borderRadius,
+                                            ),
+                                          ),
+                                          constraints: const BoxConstraints(
+                                            maxWidth:
+                                                FluffyThemes.columnWidth * 1.5,
+                                          ),
+                                          child: Column(
+                                            mainAxisSize: .min,
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: <Widget>[
+                                              if (event.inReplyToEventId(
+                                                    includingFallback: false,
+                                                  ) !=
+                                                  null)
+                                                FutureBuilder<Event?>(
+                                                  future: event.getReplyEvent(
+                                                    timeline,
+                                                  ),
+                                                  builder: (BuildContext context, snapshot) {
+                                                    final replyEvent =
+                                                        snapshot.hasData
+                                                        ? snapshot.data!
+                                                        : Event(
+                                                            eventId:
+                                                                event
+                                                                    .inReplyToEventId() ??
+                                                                '\$fake_event_id',
+                                                            content: {
+                                                              'msgtype':
+                                                                  'm.text',
+                                                              'body': '...',
+                                                            },
+                                                            senderId:
+                                                                event.senderId,
+                                                            type:
+                                                                'm.room.message',
+                                                            room: event.room,
+                                                            status: EventStatus
+                                                                .sent,
+                                                            originServerTs:
+                                                                DateTime.now(),
+                                                          );
+                                                    return Padding(
+                                                      padding:
+                                                          const EdgeInsets.only(
+                                                            left: 16,
+                                                            right: 16,
+                                                            top: 8,
+                                                          ),
+                                                      child: Material(
+                                                        color:
+                                                            Colors.transparent,
+                                                        borderRadius:
+                                                            ReplyContent
+                                                                .borderRadius,
+                                                        child: InkWell(
+                                                          borderRadius:
+                                                              ReplyContent
+                                                                  .borderRadius,
+                                                          onTap: () =>
+                                                              scrollToEventId(
+                                                                replyEvent
+                                                                    .eventId,
+                                                              ),
+                                                          child: AbsorbPointer(
+                                                            child: ReplyContent(
+                                                              replyEvent,
+                                                              ownMessage:
+                                                                  ownMessage,
+                                                              timeline:
+                                                                  timeline,
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    );
+                                                  },
+                                                ),
+                                              MessageContent(
+                                                displayEvent,
+                                                textColor: textColor,
+                                                linkColor: linkColor,
+                                                onInfoTab: onInfoTab,
+                                                borderRadius: borderRadius,
+                                                timeline: timeline,
+                                                selected: selected,
+                                                bigEmojis: bigEmojis,
+                                              ),
+                                              if (event.hasAggregatedEvents(
+                                                timeline,
+                                                RelationshipTypes.edit,
+                                              ))
+                                                Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                        bottom: 8.0,
+                                                        left: 16.0,
+                                                        right: 16.0,
+                                                      ),
+                                                  child: Row(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
+                                                    spacing: 4.0,
+                                                    children: [
+                                                      Icon(
+                                                        Icons.edit_outlined,
+                                                        color: textColor
+                                                            .withAlpha(164),
+                                                        size: 14,
+                                                      ),
+                                                      Text(
+                                                        displayEvent
+                                                            .originServerTs
+                                                            .localizedTimeShort(
+                                                              context,
+                                                            ),
+                                                        style: TextStyle(
+                                                          color: textColor
+                                                              .withAlpha(164),
+                                                          fontSize: 11,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Align(
+                                alignment: ownMessage
+                                    ? Alignment.bottomRight
+                                    : Alignment.bottomLeft,
+                                child: AnimatedSize(
+                                  duration: FluffyThemes.animationDuration,
+                                  curve: FluffyThemes.animationCurve,
+                                  child: showReactionPicker
+                                      ? Padding(
+                                          padding: const EdgeInsets.all(4.0),
+                                          child: Material(
+                                            elevation: 4,
+                                            borderRadius: BorderRadius.circular(
+                                              AppConfig.borderRadius,
+                                            ),
+                                            shadowColor: theme
+                                                .colorScheme
+                                                .surface
+                                                .withAlpha(128),
+                                            child: SingleChildScrollView(
+                                              scrollDirection: Axis.horizontal,
+                                              child: Row(
+                                                mainAxisSize: .min,
+                                                children: [
+                                                  ...AppConfig.defaultReactions.map(
+                                                    (emoji) => IconButton(
+                                                      padding: EdgeInsets.zero,
+                                                      icon: Center(
+                                                        child: Opacity(
+                                                          opacity:
+                                                              sentReactions
+                                                                  .contains(
+                                                                    emoji,
+                                                                  )
+                                                              ? 0.33
+                                                              : 1,
+                                                          child: Text(
+                                                            emoji,
+                                                            style:
+                                                                const TextStyle(
+                                                                  fontSize: 20,
+                                                                ),
+                                                            textAlign: TextAlign
+                                                                .center,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                      onPressed:
+                                                          sentReactions
+                                                              .contains(emoji)
+                                                          ? null
+                                                          : () {
+                                                              onSelect(event);
+                                                              event.room
+                                                                  .sendReaction(
+                                                                    event
+                                                                        .eventId,
+                                                                    emoji,
+                                                                  );
+                                                            },
+                                                    ),
+                                                  ),
+                                                  IconButton(
+                                                    icon: const Icon(
+                                                      Icons
+                                                          .add_reaction_outlined,
+                                                    ),
+                                                    tooltip: L10n.of(
+                                                      context,
+                                                    ).customReaction,
+                                                    onPressed: () async {
+                                                      final emoji = await showAdaptiveBottomSheet<String>(
+                                                        context: context,
+                                                        builder: (context) => Scaffold(
+                                                          appBar: AppBar(
+                                                            title: Text(
+                                                              L10n.of(
+                                                                context,
+                                                              ).customReaction,
+                                                            ),
+                                                            leading: CloseButton(
+                                                              onPressed: () =>
+                                                                  Navigator.of(
+                                                                    context,
+                                                                  ).pop(null),
+                                                            ),
+                                                          ),
+                                                          body: SizedBox(
+                                                            height:
+                                                                double.infinity,
+                                                            child: EmojiPicker(
+                                                              onEmojiSelected:
+                                                                  (_, emoji) =>
+                                                                      Navigator.of(
+                                                                        context,
+                                                                      ).pop(
+                                                                        emoji
+                                                                            .emoji,
+                                                                      ),
+                                                              config: Config(
+                                                                locale:
+                                                                    Localizations.localeOf(
+                                                                      context,
+                                                                    ),
+                                                                emojiViewConfig:
+                                                                    const EmojiViewConfig(
+                                                                      backgroundColor:
+                                                                          Colors
+                                                                              .transparent,
+                                                                    ),
+                                                                bottomActionBarConfig:
+                                                                    const BottomActionBarConfig(
+                                                                      enabled:
+                                                                          false,
+                                                                    ),
+                                                                categoryViewConfig: CategoryViewConfig(
+                                                                  initCategory:
+                                                                      Category
+                                                                          .SMILEYS,
+                                                                  backspaceColor: theme
+                                                                      .colorScheme
+                                                                      .primary,
+                                                                  iconColor: theme
+                                                                      .colorScheme
+                                                                      .primary
+                                                                      .withAlpha(
+                                                                        128,
+                                                                      ),
+                                                                  iconColorSelected: theme
+                                                                      .colorScheme
+                                                                      .primary,
+                                                                  indicatorColor: theme
+                                                                      .colorScheme
+                                                                      .primary,
+                                                                  backgroundColor: theme
+                                                                      .colorScheme
+                                                                      .surface,
+                                                                ),
+                                                                skinToneConfig: SkinToneConfig(
+                                                                  dialogBackgroundColor: Color.lerp(
+                                                                    theme
+                                                                        .colorScheme
+                                                                        .surface,
+                                                                    theme
+                                                                        .colorScheme
+                                                                        .primaryContainer,
+                                                                    0.75,
+                                                                  )!,
+                                                                  indicatorColor: theme
+                                                                      .colorScheme
+                                                                      .onSurface,
+                                                                ),
+                                                              ),
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      );
+                                                      if (emoji == null) {
+                                                        return;
+                                                      }
+                                                      if (sentReactions
+                                                          .contains(emoji)) {
+                                                        return;
+                                                      }
+                                                      onSelect(event);
+
+                                                      await event.room
+                                                          .sendReaction(
+                                                            event.eventId,
+                                                            emoji,
+                                                          );
+                                                    },
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ),
+                                        )
+                                      : const SizedBox.shrink(),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+
+                AnimatedSize(
+                  duration: FluffyThemes.animationDuration,
+                  curve: FluffyThemes.animationCurve,
+                  alignment: Alignment.bottomCenter,
+                  child: !hasReactions
+                      ? const SizedBox.shrink()
+                      : Padding(
+                          padding: EdgeInsets.only(
+                            top: 1.0,
+                            left: (ownMessage ? 0 : Avatar.defaultSize) + 12.0,
+                            right: ownMessage ? 0 : 12.0,
+                          ),
+                          child: MessageReactions(event, timeline),
+                        ),
+                ),
+                if (enterThread != null)
+                  AnimatedSize(
+                    duration: FluffyThemes.animationDuration,
+                    curve: FluffyThemes.animationCurve,
+                    alignment: Alignment.bottomCenter,
+                    child: threadChildren.isEmpty
+                        ? const SizedBox.shrink()
+                        : Padding(
+                            padding: const EdgeInsets.only(
+                              top: 2.0,
+                              bottom: 8.0,
+                              left: Avatar.defaultSize + 8,
+                            ),
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(
+                                maxWidth: FluffyThemes.columnWidth * 1.5,
+                              ),
+                              child: TextButton.icon(
+                                style: TextButton.styleFrom(
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  foregroundColor:
+                                      theme.colorScheme.onSecondaryContainer,
+                                  backgroundColor:
+                                      theme.colorScheme.secondaryContainer,
+                                ),
+                                onPressed: () => enterThread(event.eventId),
+                                icon: const Icon(Icons.message),
+                                label: Text(
+                                  '${L10n.of(context).countReplies(threadChildren.length)} | ${threadChildren.first.calcLocalizedBodyFallback(MatrixLocals(L10n.of(context)), withSenderNamePrefix: true)}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ),
+                          ),
+                  ),
+                if (displayReadMarker)
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Divider(
+                          color: theme.colorScheme.surfaceContainerHighest,
+                        ),
+                      ),
+                      Container(
+                        margin: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 16.0,
+                        ),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(
+                            AppConfig.borderRadius / 3,
+                          ),
+                          color: theme.colorScheme.surface.withAlpha(128),
+                        ),
+                        child: Text(
+                          L10n.of(context).readUpToHere,
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      Expanded(
+                        child: Divider(
+                          color: theme.colorScheme.surfaceContainerHighest,
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class BubbleBackground extends StatelessWidget {
+  const BubbleBackground({
+    super.key,
+    required this.scrollController,
+    required this.colors,
+    required this.ignore,
+    required this.child,
+  });
+
+  final ScrollController scrollController;
+  final List<Color> colors;
+  final bool ignore;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (ignore) return child;
+    return CustomPaint(
+      painter: BubblePainter(
+        repaint: scrollController,
+        colors: colors,
+        context: context,
+      ),
+      child: child,
+    );
+  }
+}
+
+class BubblePainter extends CustomPainter {
+  BubblePainter({
+    required this.context,
+    required this.colors,
+    required super.repaint,
+  });
+
+  final BuildContext context;
+  final List<Color> colors;
+  ScrollableState? _scrollable;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final scrollable = _scrollable ??= Scrollable.of(context);
+    final scrollableBox = scrollable.context.findRenderObject() as RenderBox;
+    final scrollableRect = Offset.zero & scrollableBox.size;
+    final bubbleBox = context.findRenderObject() as RenderBox;
+
+    final origin = bubbleBox.localToGlobal(
+      Offset.zero,
+      ancestor: scrollableBox,
+    );
+    final paint = Paint()
+      ..shader = ui.Gradient.linear(
+        scrollableRect.topCenter,
+        scrollableRect.bottomCenter,
+        colors,
+        [0.0, 1.0],
+        TileMode.clamp,
+        Matrix4.translationValues(-origin.dx, -origin.dy, 0.0).storage,
+      );
+    canvas.drawRect(Offset.zero & size, paint);
+  }
+
+  @override
+  bool shouldRepaint(BubblePainter oldDelegate) {
+    final scrollable = Scrollable.of(context);
+    final oldScrollable = _scrollable;
+    _scrollable = scrollable;
+    return scrollable.position != oldScrollable?.position;
+  }
+}
+
+class _AnimateIn extends StatefulWidget {
+  final bool animateIn;
+  final Widget child;
+  const _AnimateIn({required this.animateIn, required this.child});
+
+  @override
+  State<_AnimateIn> createState() => __AnimateInState();
+}
+
+class __AnimateInState extends State<_AnimateIn> {
+  bool _animationFinished = false;
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.animateIn) return widget.child;
+    if (!_animationFinished) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        setState(() {
+          _animationFinished = true;
+        });
+      });
+    }
+    return AnimatedSize(
+      duration: FluffyThemes.animationDuration,
+      curve: FluffyThemes.animationCurve,
+      child: _animationFinished ? widget.child : const SizedBox.shrink(),
+    );
+  }
+}

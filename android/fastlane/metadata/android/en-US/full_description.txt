@@ -1,0 +1,19 @@
+GaussInteract is an enterprise-grade, agentic-AI-ready Matrix messaging client by Gaussian Technologies for Android, iOS, Web and Desktop.
+
+Sovereign
+Self-host or run on a sovereign GaussMatrix homeserver. Your data stays under your control.
+
+Secure by design
+End-to-end encryption (Olm/Megolm via vodozemac), cross-signing and encrypted key backup.
+
+Agentic
+AI agents participate as first-class, cross-signed Matrix identities with capability scoping, human-in-the-loop approval and a tamper-evident audit trail.
+
+One codebase, every platform
+A single application reaching Android, iOS, Web and Desktop (Linux, macOS, Windows).
+
+Open standards
+Built on the Matrix protocol. Compatible with Element, Nheko, NeoChat and all other Matrix clients.
+
+Built on FluffyChat
+GaussInteract is built on the open-source FluffyChat codebase (AGPL-3.0) by Christian Kußowski and contributors.
