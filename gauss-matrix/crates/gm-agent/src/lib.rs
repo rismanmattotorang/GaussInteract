@@ -61,6 +61,7 @@ use crate::mcp::{ToolCall, ToolExecutor};
 use crate::resources::{
     render_timeline, room_from_uri, room_resource_uri, McpResource, ResourceContents, RoomContext,
 };
+use gm_obs::Metrics;
 use gm_store::{audit, MemoryStore, Store};
 use std::fmt;
 
@@ -154,6 +155,7 @@ pub struct AgentGateway<S: Store = MemoryStore, C: Clock = SystemClock> {
     clock: C,
     /// `(agent, unix_secs)` of admitted calls, for sliding-window rate limiting.
     recent_calls: Vec<(String, u64)>,
+    metrics: Metrics,
 }
 
 impl AgentGateway<MemoryStore, SystemClock> {
@@ -187,12 +189,26 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
             store,
             clock,
             recent_calls: Vec::new(),
+            metrics: Metrics::new(),
         }
     }
 
     /// Pending approvals the client should render to a human.
     pub fn pending(&self) -> &[PendingApproval] {
         &self.pending
+    }
+
+    /// The gateway's metrics registry (Prometheus-renderable, spec §VIII.A).
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
+    }
+
+    /// Count one mediation outcome and refresh the pending-approvals gauge.
+    fn record_outcome(&mut self, outcome: &str) {
+        self.metrics
+            .inc_counter("gm_agent_actions_total", &[("outcome", outcome)]);
+        self.metrics
+            .set_gauge("gm_agent_pending_approvals", &[], self.pending.len() as i64);
     }
 
     /// Load the authoritative audit entries, oldest first (read-only).
@@ -214,6 +230,8 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
             grant.agent.as_str(),
             &format!("resources_listed: {}", grant.accessible_rooms.len()),
         );
+        self.metrics
+            .inc_counter("gm_agent_resource_lists_total", &[]);
         grant
             .accessible_rooms
             .iter()
@@ -234,14 +252,22 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
         uri: &str,
         ctx: &R,
     ) -> Result<ResourceContents, GatewayError> {
-        let room =
-            room_from_uri(uri).ok_or_else(|| GatewayError::UnknownResource(uri.to_owned()))?;
+        let room = match room_from_uri(uri) {
+            Some(room) => room,
+            None => {
+                self.metrics
+                    .inc_counter("gm_agent_resource_reads_total", &[("result", "unknown")]);
+                return Err(GatewayError::UnknownResource(uri.to_owned()));
+            }
+        };
         if !grant.permits_room(&room) {
             audit::append(
                 &mut self.store,
                 grant.agent.as_str(),
                 &format!("resource_denied: {uri}"),
             );
+            self.metrics
+                .inc_counter("gm_agent_resource_reads_total", &[("result", "denied")]);
             return Err(GatewayError::ResourceAccessDenied(uri.to_owned()));
         }
         let text = render_timeline(&ctx.messages(&room));
@@ -250,6 +276,8 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
             grant.agent.as_str(),
             &format!("resource_read: {uri}"),
         );
+        self.metrics
+            .inc_counter("gm_agent_resource_reads_total", &[("result", "ok")]);
         Ok(ResourceContents {
             uri: uri.to_owned(),
             mime_type: "text/plain".to_owned(),
@@ -280,6 +308,7 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 call.agent.as_str(),
                 &format!("unmanaged_agent: {}", call.agent),
             );
+            self.record_outcome("unmanaged");
             return Outcome::Denied {
                 reason: format!("{} is not a managed agent identity", call.agent),
                 events: Vec::new(),
@@ -327,6 +356,7 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 call.agent.as_str(),
                 &format!("denied_by_scope: {} in {}", call.tool, call.room),
             );
+            self.record_outcome("denied_scope");
             return Outcome::Denied {
                 reason: format!("{} is not permitted in {}", call.tool, call.room),
                 events: Vec::new(),
@@ -338,6 +368,7 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 call.agent.as_str(),
                 &format!("rate_limited: {}", call.tool),
             );
+            self.record_outcome("rate_limited");
             return Outcome::Denied {
                 reason: format!(
                     "rate limit of {}/min exceeded for {}",
@@ -366,6 +397,7 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 );
                 let result_event =
                     ReflectedEvent::tool_result(&call_id, &call.tool, outcome.ok, &outcome.summary);
+                self.record_outcome("executed");
                 Outcome::Executed {
                     events: vec![call_event, result_event],
                 }
@@ -386,6 +418,7 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                     call_id,
                     call,
                 });
+                self.record_outcome("review");
                 Outcome::AwaitingApproval {
                     request_id,
                     event: call_event,
@@ -428,6 +461,7 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 outcome.ok,
                 &outcome.summary,
             );
+            self.record_outcome("executed");
             Ok(Outcome::Executed {
                 events: vec![receipt, result_event],
             })
@@ -437,6 +471,7 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 pending.call.agent.as_str(),
                 &format!("denied_by {}: {}", decided_by, pending.call.tool),
             );
+            self.record_outcome("denied_human");
             Ok(Outcome::Denied {
                 reason: format!("{} denied by {}", pending.call.tool, decided_by),
                 events: vec![receipt],
@@ -722,5 +757,36 @@ mod tests {
             Outcome::Executed { .. }
         ));
         assert_eq!(gw.verify_audit(), Ok(()));
+    }
+
+    #[test]
+    fn metrics_count_mediation_outcomes() {
+        let mut gw = AgentGateway::new();
+        let mut exec = EchoExecutor;
+
+        gw.handle(&grant(), call("search"), &mut exec); // auto -> executed
+        gw.handle(&grant(), call("send_email"), &mut exec); // review -> pending
+        gw.handle(&grant(), call("rm_rf"), &mut exec); // forbidden -> denied_scope
+
+        assert_eq!(
+            gw.metrics()
+                .counter("gm_agent_actions_total", &[("outcome", "executed")]),
+            1
+        );
+        assert_eq!(
+            gw.metrics()
+                .counter("gm_agent_actions_total", &[("outcome", "review")]),
+            1
+        );
+        assert_eq!(
+            gw.metrics()
+                .counter("gm_agent_actions_total", &[("outcome", "denied_scope")]),
+            1
+        );
+
+        // The Prometheus rendering reflects the pending-approvals gauge.
+        let text = gw.metrics().render_prometheus();
+        assert!(text.contains("# TYPE gm_agent_actions_total counter"));
+        assert!(text.contains("gm_agent_pending_approvals 1"));
     }
 }

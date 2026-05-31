@@ -124,4 +124,9 @@ exporter + OpenTelemetry traces, land behind their own features.
 `gm-obs` (§VIII.A) turns the durable audit log into structured records and
 streams them to a pluggable SIEM sink (`stream_audit` → newline-delimited JSON),
 carrying the chain hashes so a SIEM can independently detect gaps or tampering,
-and exposes counters/gauges in the Prometheus text exposition format.
+and exposes counters/gauges in the Prometheus text exposition format. The
+gateway is instrumented with it: every mediation outcome bumps
+`gm_agent_actions_total{outcome="executed"|"review"|"denied_scope"|"rate_limited"|"denied_human"|"unmanaged"}`,
+resource reads bump `gm_agent_resource_reads_total{result=…}`, and a
+`gm_agent_pending_approvals` gauge tracks the human-in-the-loop queue —
+exposed via `AgentGateway::metrics().render_prometheus()`.

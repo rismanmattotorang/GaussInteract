@@ -6,6 +6,7 @@ version = 3
 name = "gm-agent"
 version = "0.0.1"
 dependencies = [
+ "gm-obs",
  "gm-store",
  "gm-util",
 ]

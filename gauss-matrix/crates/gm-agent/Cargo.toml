@@ -21,6 +21,7 @@ default = []
 mcp = []
 
 [dependencies]
+gm-obs = { path = "../gm-obs" }
 gm-store = { path = "../gm-store" }
 gm-util = { path = "../gm-util" }
 # Further deps the implementation will add: ruma (Matrix types), the
