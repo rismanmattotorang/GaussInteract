@@ -192,6 +192,15 @@ class SettingsView extends StatelessWidget {
                   ? theme.colorScheme.surfaceContainerHigh
                   : null,
             ),
+            ListTile(
+              leading: const Icon(Icons.smart_toy_outlined),
+              title: const Text('AI agents'),
+              subtitle: const Text('Approvals & audit'),
+              onTap: () => context.go('/agents'),
+              tileColor: activeRoute.startsWith('/agents')
+                  ? theme.colorScheme.surfaceContainerHigh
+                  : null,
+            ),
             Divider(color: theme.dividerColor),
             ListTile(
               leading: const Icon(Icons.dns_outlined),

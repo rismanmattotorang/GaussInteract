@@ -6,6 +6,7 @@
 import 'dart:async';
 
 import 'package:gaussinteract/config/themes.dart';
+import 'package:gaussinteract/pages/agent/agent_console.dart';
 import 'package:gaussinteract/pages/archive/archive.dart';
 import 'package:gaussinteract/pages/bootstrap/bootstrap_dialog.dart';
 import 'package:gaussinteract/pages/chat/chat.dart';
@@ -106,6 +107,11 @@ abstract class AppRoutes {
       path: '/configs',
       pageBuilder: (context, state) =>
           defaultPageBuilder(context, state, const ConfigViewer()),
+    ),
+    GoRoute(
+      path: '/agents',
+      pageBuilder: (context, state) =>
+          defaultPageBuilder(context, state, const AgentConsole()),
     ),
     GoRoute(
       path: '/backup',

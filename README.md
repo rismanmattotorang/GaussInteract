@@ -79,6 +79,8 @@ GaussInteract is the human end of a platform-wide agentic loop in which **AI age
 - **E2EE-bound.** An agent only ever receives the Megolm sessions a room granted it; the client makes that grant visible.
 - **Auditable.** A read-only view exposes the hash-chained, tamper-evident record of every agent action — provisioned via the Model-Context-Protocol (MCP) gateway in GaussMatrix.
 
+A first cut of this surface ships today: the **Agent console** (Settings → *AI agents*, or the `/agents` route) renders inline approval cards and the live audit view against the in-app `GaussCore.stub()`, ahead of the FFI wiring. See `lib/pages/agent/`.
+
 ---
 
 ## Enterprise surface
