@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "gm-obs"
+description = "GaussMatrix observability: Prometheus-compatible metrics and structured audit-log emission for SIEM ingestion."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "gm_obs"
+
+[dependencies]
+gm-store = { path = "../gm-store" }
+# OpenTelemetry traces and a Prometheus HTTP exporter land behind features
+# later; the in-process registry and SIEM sinks need no external deps.
+
+[dev-dependencies]

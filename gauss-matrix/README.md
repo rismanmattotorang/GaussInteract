@@ -46,10 +46,14 @@ gauss-matrix/
     │       ├── lib.rs        # Store trait + per-domain column families (cf::*)
     │       ├── memory.rs     # in-memory backend (RocksDB/distributed-KV later)
     │       └── audit.rs      # durable, tamper-evident audit log (§IV.D)
-    └── gm-util/          # shared primitives (§III.B)
+    ├── gm-util/          # shared primitives (§III.B)
+    │   └── src/
+    │       ├── ids.rs        # validated UserId / RoomId / AgentId newtypes
+    │       └── error.rs      # the common GmError
+    └── gm-obs/           # observability (§VIII.A)
         └── src/
-            ├── ids.rs        # validated UserId / RoomId / AgentId newtypes
-            └── error.rs      # the common GmError
+            ├── metrics.rs    # Prometheus-compatible counters/gauges
+            └── siem.rs       # structured audit-log emission to a SIEM sink
 ```
 
 Agent and room identifiers are validated through `gm-util` at the system's edge
@@ -110,8 +114,14 @@ cargo fmt --check
 ## Remaining crates (spec §III.B)
 
 `gm-http` · `gm-api` · `gm-svc` · `gm-stateres` · `gm-fed` · `gm-e2ee` ·
-`gm-shard` · `gm-obs` — added as implemented (`gm-agent`, `gm-store` and
-`gm-util` are in place). The remaining live `gm-agent` wiring (Application
+`gm-shard` — added as implemented (`gm-agent`, `gm-store`, `gm-util` and
+`gm-obs` are in place). The remaining live `gm-agent` wiring (Application
 Service registration for cross-signed agent identities, the MCP transport, and
 E2EE-aware mediation via `gm-e2ee`) lands behind the `mcp` feature; the
-RocksDB / distributed-KV `gm-store` backends land behind their own features.
+RocksDB / distributed-KV `gm-store` backends, and `gm-obs`'s Prometheus HTTP
+exporter + OpenTelemetry traces, land behind their own features.
+
+`gm-obs` (§VIII.A) turns the durable audit log into structured records and
+streams them to a pluggable SIEM sink (`stream_audit` → newline-delimited JSON),
+carrying the chain hashes so a SIEM can independently detect gaps or tampering,
+and exposes counters/gauges in the Prometheus text exposition format.

@@ -11,6 +11,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gm-obs"
+version = "0.0.1"
+dependencies = [
+ "gm-store",
+]
+
+[[package]]
 name = "gm-store"
 version = "0.0.1"
 
