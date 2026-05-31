@@ -10,6 +10,7 @@ import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/agent/agent_approval_card.dart';
 import 'package:gaussinteract/pages/agent/agent_audit_view.dart';
+import 'package:gaussinteract/pages/agent/agent_capability_view.dart';
 import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
 
 /// The supervisor surface for AI agents (GaussInteract-SPECS §IV, §V.F):
@@ -30,6 +31,26 @@ class AgentConsole extends StatefulWidget {
 class _AgentConsoleState extends State<AgentConsole> {
   final GaussCore _core = GaussCore.stub();
   int _sampleIndex = 0;
+
+  // A sample capability grant in the exact m.gauss.agent.capability content
+  // shape the GaussMatrix gateway publishes (parsed via the shared model).
+  static const Map<String, Object?> _sampleCapability = {
+    'agent': '@gauss_agent_assistant:gaussian.tech',
+    'rate_limit_per_min': 30,
+    'default_class': 'auto',
+    'allowed_tools': [
+      'search_knowledge_base',
+      'send_external_email',
+      'invite_user',
+      'set_power_level',
+    ],
+    'accessible_rooms': ['!ops:gaussian.tech'],
+    'overrides': [
+      ['send_external_email', 'review'],
+      ['invite_user', 'review'],
+      ['set_power_level', 'review'],
+    ],
+  };
 
   static const List<({String agent, String tool, String action})> _samples = [
     (
@@ -82,6 +103,7 @@ class _AgentConsoleState extends State<AgentConsole> {
     final theme = Theme.of(context);
     final l10n = L10n.of(context);
     final pending = _core.pendingApprovals;
+    final grant = GaussCapabilityGrant.fromContent(_sampleCapability);
 
     return Scaffold(
       appBar: AppBar(
@@ -103,6 +125,10 @@ class _AgentConsoleState extends State<AgentConsole> {
           child: ListView(
             padding: const EdgeInsets.all(16),
             children: [
+              if (grant != null) ...[
+                AgentCapabilityView(grant: grant),
+                const SizedBox(height: 24),
+              ],
               Text(l10n.agentTimeline, style: theme.textTheme.titleMedium),
               const SizedBox(height: 4),
               Text(

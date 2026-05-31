@@ -20,6 +20,15 @@
     "agentToolResult": "Tool result",
     "agentToolSucceeded": "Succeeded",
     "agentToolFailed": "Failed",
+    "agentPermissions": "Agent permissions",
+    "agentRateLimit": "Rate limit",
+    "agentUnlimited": "Unlimited",
+    "agentDefault": "Default",
+    "agentAllowedTools": "Allowed tools",
+    "agentAccessibleRooms": "Accessible rooms",
+    "agentClassAuto": "Auto",
+    "agentClassReview": "Review",
+    "agentClassForbidden": "Forbidden",
     "alwaysUse24HourFormat": "false",
     "@alwaysUse24HourFormat": {
         "description": "Set to true to always display time of day in 24 hour format."

@@ -24,6 +24,10 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Agent console'), findsOneWidget);
+      // The capability grant (parsed from server-shaped content) is shown.
+      expect(find.text('Agent permissions'), findsOneWidget);
+      expect(find.text('Allowed tools'), findsOneWidget);
+      expect(find.text('search_knowledge_base'), findsOneWidget);
       // Two review-class actions are seeded on init.
       expect(find.widgetWithText(FilledButton, 'Approve'), findsNWidgets(2));
       expect(find.text('Tamper-evident audit log'), findsOneWidget);
