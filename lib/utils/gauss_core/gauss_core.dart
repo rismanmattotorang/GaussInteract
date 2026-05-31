@@ -59,28 +59,6 @@ class GaussApprovalRequest {
   final String proposedAction;
 }
 
-/// One entry of the tamper-evident, hash-chained audit log (§IV.D).
-class GaussAuditEntry {
-  const GaussAuditEntry({
-    required this.agent,
-    required this.event,
-    required this.prevHash,
-    required this.hash,
-  });
-
-  /// The agent the entry concerns.
-  final String agent;
-
-  /// A description of the recorded gateway decision/event.
-  final String event;
-
-  /// Hash committing to the previous entry (0 for the genesis entry).
-  final int prevHash;
-
-  /// Hash of this entry, over its content and [prevHash].
-  final int hash;
-}
-
 /// The single object the UI talks to, mirroring `gauss_core::GaussCore`.
 abstract class GaussCore {
   /// The in-app stub implementation used until the FFI bindings land.
@@ -105,8 +83,9 @@ abstract class GaussCore {
   /// Resolve a pending approval; returns whether the id was found.
   bool resolveApproval(int id, GaussApprovalDecision decision);
 
-  /// The read-only audit log for the supervisor view (oldest first).
-  List<GaussAuditEntry> get auditLog;
+  /// The read-only audit log for the supervisor view (oldest first), in the
+  /// same [GaussAuditRecord] shape the GaussMatrix server emits.
+  List<GaussAuditRecord> get auditLog;
 
   /// Whether the audit chain verifies intact (no retroactive tampering).
   bool verifyAudit();
@@ -117,7 +96,7 @@ abstract class GaussCore {
 class GaussCoreStub implements GaussCore {
   int _nextId = 0;
   final List<GaussApprovalRequest> _pending = <GaussApprovalRequest>[];
-  final List<GaussAuditEntry> _audit = <GaussAuditEntry>[];
+  final List<GaussAuditRecord> _audit = <GaussAuditRecord>[];
 
   @override
   String get version => '0.0.1-stub';
@@ -160,38 +139,39 @@ class GaussCoreStub implements GaussCore {
   }
 
   @override
-  List<GaussAuditEntry> get auditLog =>
-      List<GaussAuditEntry>.unmodifiable(_audit);
+  List<GaussAuditRecord> get auditLog =>
+      List<GaussAuditRecord>.unmodifiable(_audit);
 
   @override
   bool verifyAudit() {
     var expectedPrev = 0;
-    for (final entry in _audit) {
-      if (entry.prevHash != expectedPrev) return false;
-      if (entry.hash != _digest(entry.agent, entry.event, entry.prevHash)) {
+    for (final record in _audit) {
+      if (record.prevHash != expectedPrev) return false;
+      if (record.hash != _digest(record.actor, record.action, record.prevHash)) {
         return false;
       }
-      expectedPrev = entry.hash;
+      expectedPrev = record.hash;
     }
     return true;
   }
 
-  void _appendAudit(String agent, String event) {
+  void _appendAudit(String actor, String action) {
     final prevHash = _audit.isEmpty ? 0 : _audit.last.hash;
     _audit.add(
-      GaussAuditEntry(
-        agent: agent,
-        event: event,
+      GaussAuditRecord(
+        seq: _audit.length,
+        actor: actor,
+        action: action,
         prevHash: prevHash,
-        hash: _digest(agent, event, prevHash),
+        hash: _digest(actor, action, prevHash),
       ),
     );
   }
 
   // Placeholder digest mirroring the Rust scaffold; the FFI core uses a
   // cryptographic hash (SHA-256 / BLAKE3). See gauss-core/src/agent.rs.
-  static int _digest(String agent, String event, int prevHash) =>
-      Object.hash(agent, event, prevHash);
+  static int _digest(String actor, String action, int prevHash) =>
+      Object.hash(actor, action, prevHash);
 }
 
 /// The wire string for a classification, matching the GaussMatrix gateway

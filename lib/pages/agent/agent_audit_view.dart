@@ -19,8 +19,8 @@ class AgentAuditView extends StatelessWidget {
     required this.verified,
   });
 
-  /// The audit entries, oldest first.
-  final List<GaussAuditEntry> entries;
+  /// The audit records, oldest first (the same shape the server emits).
+  final List<GaussAuditRecord> entries;
 
   /// Whether the chain currently verifies intact.
   final bool verified;
@@ -83,7 +83,7 @@ class _AuditTile extends StatelessWidget {
   const _AuditTile({required this.index, required this.entry});
 
   final int index;
-  final GaussAuditEntry entry;
+  final GaussAuditRecord entry;
 
   @override
   Widget build(BuildContext context) {
@@ -101,9 +101,9 @@ class _AuditTile extends StatelessWidget {
           ),
         ),
       ),
-      title: Text(entry.event, style: theme.textTheme.bodyMedium),
+      title: Text(entry.action, style: theme.textTheme.bodyMedium),
       subtitle: Text(
-        entry.agent,
+        entry.actor,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: theme.textTheme.bodySmall?.copyWith(

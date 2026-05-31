@@ -44,7 +44,8 @@ gauss-matrix/
     ├── gm-store/         # pluggable storage abstraction (§III.C)
     │   └── src/
     │       ├── lib.rs        # Store trait + per-domain column families (cf::*)
-    │       ├── memory.rs     # in-memory backend (RocksDB/distributed-KV later)
+    │       ├── memory.rs     # in-memory backend
+    │       ├── rocks.rs      # RocksDB single-node-profile layout (`rocksdb` feature)
     │       └── audit.rs      # durable, tamper-evident audit log (§IV.D)
     ├── gm-util/          # shared primitives (§III.B)
     │   └── src/
