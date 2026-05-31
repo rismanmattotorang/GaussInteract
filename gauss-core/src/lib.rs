@@ -32,6 +32,7 @@
 //! | [`sync`]      | Simplified sliding sync engine                   | §V.C |
 //! | [`e2ee`]      | vodozemac-backed E2EE (Olm/Megolm, cross-signing)| §V.B, §VI.B |
 //! | [`timeline`]  | Timeline item model (incl. first-class agent items)| §V.D, §V.F |
+//! | [`events`]    | Namespaced `m.gauss.agent.*` events + capability grants | §IV.B–C |
 //! | [`agent`]     | Client agent surface: approvals + tamper-evident audit | §IV, §V.F |
 //!
 //! [vodozemac]: https://github.com/matrix-org/vodozemac
@@ -43,6 +44,7 @@
 pub mod agent;
 pub mod e2ee;
 pub mod error;
+pub mod events;
 pub mod session;
 pub mod store;
 pub mod sync;

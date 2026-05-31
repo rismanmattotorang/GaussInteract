@@ -22,17 +22,22 @@
 //! structure and [`AuditLog::verify`] contract are unchanged. This is the one
 //! place where the placeholder must not be mistaken for real tamper-evidence.
 
+use crate::events::CapabilityGrant;
 use std::hash::{Hash, Hasher};
 
-/// How an agent action is classified (§IV.C).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActionClass {
-    /// Executed immediately.
-    Auto,
-    /// Executed only after explicit human approval.
-    Review,
-    /// Never permitted.
-    Forbidden,
+pub use crate::events::ActionClass;
+
+/// The outcome of evaluating a proposed agent action against its capability
+/// grant (§IV.C): execute now, ask a human first, or refuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gate {
+    /// `Auto`-class: the gateway may proceed immediately.
+    Allow,
+    /// `Review`-class: a human-in-the-loop approval was created; the contained
+    /// id links to the rendered [`crate::timeline::TimelineKind::ApprovalPrompt`].
+    NeedsApproval(u64),
+    /// `Forbidden`: refused by scope before any human is bothered.
+    Denied(crate::GaussError),
 }
 
 /// A human decision on a [`ApprovalRequest`].
@@ -168,6 +173,38 @@ impl AgentSurface {
         id
     }
 
+    /// Evaluate a proposed agent action against its capability grant (§IV.C).
+    ///
+    /// `Forbidden` is refused outright; `Review` creates a human-in-the-loop
+    /// approval; `Auto` is allowed immediately. Every outcome is audited, so the
+    /// log records refusals and auto-allows, not just the actions a human saw.
+    pub fn evaluate(
+        &mut self,
+        grant: &CapabilityGrant,
+        room: &str,
+        tool: &str,
+        proposed_action: impl Into<String>,
+    ) -> Gate {
+        match grant.classify(tool, room) {
+            ActionClass::Forbidden => {
+                self.audit
+                    .append(&grant.agent, format!("denied_by_scope: {tool}"));
+                Gate::Denied(crate::GaussError::AgentDenied(format!(
+                    "{tool} is not permitted in {room}"
+                )))
+            }
+            ActionClass::Auto => {
+                self.audit
+                    .append(&grant.agent, format!("auto_allowed: {tool}"));
+                Gate::Allow
+            }
+            ActionClass::Review => {
+                let id = self.request_approval(&grant.agent, tool, proposed_action);
+                Gate::NeedsApproval(id)
+            }
+        }
+    }
+
     /// Pending approval prompts the UI should render (§V.F).
     pub fn pending(&self) -> &[ApprovalRequest] {
         &self.pending
@@ -235,5 +272,36 @@ mod tests {
     fn resolving_unknown_request_is_noop() {
         let mut surface = AgentSurface::new();
         assert!(!surface.resolve(999, ApprovalDecision::Deny));
+    }
+
+    #[test]
+    fn evaluate_gates_on_capability_grant() {
+        use crate::events::CapabilityGrant;
+        let mut grant = CapabilityGrant::deny_all("@assistant:example.org");
+        grant.accessible_rooms.push("!r:example.org".into());
+        grant.allowed_tools.push("search".into());
+        grant.allowed_tools.push("send_email".into());
+        grant.default_class = ActionClass::Auto;
+        grant
+            .overrides
+            .push(("send_email".into(), ActionClass::Review));
+
+        let mut s = AgentSurface::new();
+        assert_eq!(
+            s.evaluate(&grant, "!r:example.org", "search", "search docs"),
+            Gate::Allow
+        );
+        assert!(matches!(
+            s.evaluate(&grant, "!r:example.org", "send_email", "email finance"),
+            Gate::NeedsApproval(_)
+        ));
+        assert!(matches!(
+            s.evaluate(&grant, "!r:example.org", "rm_rf", "delete everything"),
+            Gate::Denied(_)
+        ));
+        // one Review created exactly one pending prompt; all three audited.
+        assert_eq!(s.pending().len(), 1);
+        assert_eq!(s.audit().entries().len(), 3); // auto_allowed + approval_requested + denied_by_scope
+        assert_eq!(s.audit().verify(), Ok(()));
     }
 }

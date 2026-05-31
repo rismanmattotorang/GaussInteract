@@ -35,13 +35,18 @@ gauss-core/
     ├── sync.rs         # simplified sliding-sync windowing          (§V.C)
     ├── e2ee.rs         # CryptoProvider facade over vodozemac    (§V.B,§VI.B)
     ├── timeline.rs     # timeline model incl. first-class agent items (§V.D/F)
+    ├── events.rs       # m.gauss.agent.* events + capability grants  (§IV.B/C)
     └── agent.rs        # approvals + tamper-evident audit log    (§IV,§V.F)
 ```
 
-The `agent` module already implements the **human-in-the-loop approval flow**
-and a working **hash-chained audit log** whose `verify()` detects retroactive
-tampering — the structural guarantees of spec §IV.C–D — so the most distinctive
-part of the platform is exercisable today.
+The `agent` and `events` modules already implement the **capability scoping**
+(`CapabilityGrant::classify` → auto / review / forbidden), the
+**human-in-the-loop approval flow** (`AgentSurface::evaluate`), and a working
+**hash-chained audit log** whose `verify()` detects retroactive tampering — the
+structural guarantees of spec §IV.B–D — so the most distinctive part of the
+platform is exercisable today. The same surface is mirrored on the Dart side in
+[`lib/utils/gauss_core/gauss_core.dart`](../lib/utils/gauss_core/gauss_core.dart),
+the integration seam the `uniffi` bindings will replace in Phase 2.
 
 ## Build & test
 

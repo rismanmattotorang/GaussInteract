@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# CI for the shared Rust core. Realises the supply-chain gates of
+# GaussInteract-SPECS §VI.C: every change is checked for formatting, lints,
+# tests, advisories (cargo audit) and licence/dependency policy (cargo deny).
+
+name: gauss-core
+
+on:
+  push:
+    branches: [main]
+    paths: ["gauss-core/**", ".github/workflows/gauss-core.yaml"]
+  pull_request:
+    paths: ["gauss-core/**", ".github/workflows/gauss-core.yaml"]
+  merge_group:
+
+defaults:
+  run:
+    working-directory: gauss-core
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gauss-core/target
+          key: gauss-core-${{ runner.os }}-${{ hashFiles('gauss-core/Cargo.lock') }}
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --all-features --locked
+      - name: Build (release)
+        run: cargo build --release --locked
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: cargo-deny (licences, advisories, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: gauss-core/Cargo.toml
+          command: check
