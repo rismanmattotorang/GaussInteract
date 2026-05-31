@@ -3,11 +3,11 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/chat/chat_input_row.dart';
 import 'package:gaussinteract/pages/chat/recording_view_model.dart';
-import 'package:flutter/material.dart';
 
 class RecordingInputRow extends StatelessWidget {
   final RecordingViewModelState state;

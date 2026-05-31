@@ -3,9 +3,9 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import 'package:gaussinteract/main.dart' as app;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gaussinteract/main.dart' as app;
 
 extension type FluffyChatTester(WidgetTester tester) {
   static int _printCounter = 1;

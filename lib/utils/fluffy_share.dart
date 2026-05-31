@@ -3,10 +3,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import 'package:gaussinteract/l10n/l10n.dart';
-import 'package:gaussinteract/utils/platform_infos.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:gaussinteract/l10n/l10n.dart';
+import 'package:gaussinteract/utils/platform_infos.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../widgets/matrix.dart';

@@ -7,14 +7,14 @@ import 'dart:isolate';
 import 'dart:ui';
 
 import 'package:collection/collection.dart';
-import 'package:gaussinteract/config/app_config.dart';
-import 'package:gaussinteract/utils/client_manager.dart';
-import 'package:gaussinteract/utils/notification_background_handler.dart';
-import 'package:gaussinteract/utils/platform_infos.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_vodozemac/flutter_vodozemac.dart' as vod;
+import 'package:gaussinteract/config/app_config.dart';
+import 'package:gaussinteract/utils/client_manager.dart';
+import 'package:gaussinteract/utils/notification_background_handler.dart';
+import 'package:gaussinteract/utils/platform_infos.dart';
 import 'package:matrix/matrix.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:universal_html/universal_html.dart' as web;

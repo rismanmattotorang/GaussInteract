@@ -3,10 +3,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/utils/string_color.dart';
 import 'package:gaussinteract/widgets/mxc_image.dart';
 import 'package:gaussinteract/widgets/presence_builder.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 class Avatar extends StatelessWidget {

@@ -3,12 +3,12 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
+import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/platform_infos.dart';
 import 'package:gaussinteract/utils/sign_in_flows/calc_redirect_url.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/show_modal_action_popup.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 import 'package:matrix/matrix.dart';
 
 Future<void> ssoLoginFlow(

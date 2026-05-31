@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/chat_search/chat_search_files_tab.dart';
@@ -11,7 +12,6 @@ import 'package:gaussinteract/pages/chat_search/chat_search_message_tab.dart';
 import 'package:gaussinteract/pages/chat_search/chat_search_page.dart';
 import 'package:gaussinteract/utils/matrix_sdk_extensions/matrix_locals.dart';
 import 'package:gaussinteract/widgets/layouts/max_width_body.dart';
-import 'package:flutter/material.dart';
 
 class ChatSearchView extends StatelessWidget {
   final ChatSearchController controller;

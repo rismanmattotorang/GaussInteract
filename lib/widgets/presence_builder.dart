@@ -5,8 +5,8 @@
 
 import 'dart:async';
 
-import 'package:gaussinteract/widgets/matrix.dart';
 import 'package:flutter/material.dart';
+import 'package:gaussinteract/widgets/matrix.dart';
 import 'package:matrix/matrix.dart';
 
 class PresenceBuilder extends StatefulWidget {

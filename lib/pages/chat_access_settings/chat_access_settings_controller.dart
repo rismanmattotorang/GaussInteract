@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart' hide Visibility;
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/chat_access_settings/chat_access_settings_page.dart';
 import 'package:gaussinteract/utils/localized_exception_extension.dart';
@@ -11,7 +12,6 @@ import 'package:gaussinteract/widgets/adaptive_dialogs/show_ok_cancel_alert_dial
 import 'package:gaussinteract/widgets/adaptive_dialogs/show_text_input_dialog.dart';
 import 'package:gaussinteract/widgets/future_loading_dialog.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
-import 'package:flutter/material.dart' hide Visibility;
 import 'package:go_router/go_router.dart';
 import 'package:matrix/matrix.dart';
 

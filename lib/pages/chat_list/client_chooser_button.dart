@@ -4,10 +4,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import 'package:async/async.dart';
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/widgets/avatar.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
-import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:matrix/matrix.dart' hide Result;
 import 'package:url_launcher/url_launcher_string.dart';

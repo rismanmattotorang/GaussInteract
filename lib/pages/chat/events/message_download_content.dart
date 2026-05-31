@@ -3,13 +3,13 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
+import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:gaussinteract/config/app_config.dart';
 import 'package:gaussinteract/pages/chat/events/file_send_status_indicator.dart';
 import 'package:gaussinteract/utils/file_description.dart';
 import 'package:gaussinteract/utils/matrix_sdk_extensions/event_extension.dart';
 import 'package:gaussinteract/utils/url_launcher.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:matrix/matrix.dart';
 
 class MessageDownloadContent extends StatelessWidget {

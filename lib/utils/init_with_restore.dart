@@ -6,12 +6,12 @@
 import 'dart:convert';
 import 'dart:ui';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:gaussinteract/config/app_config.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/client_manager.dart';
 import 'package:gaussinteract/utils/platform_infos.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:matrix/matrix.dart';
 
 class SessionBackup {

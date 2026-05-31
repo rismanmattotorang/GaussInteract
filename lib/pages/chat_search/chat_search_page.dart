@@ -3,9 +3,9 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/pages/chat_search/chat_search_view.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 class ChatSearchPage extends StatefulWidget {

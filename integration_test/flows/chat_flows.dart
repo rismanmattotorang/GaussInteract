@@ -3,10 +3,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import 'package:gaussinteract/pages/chat_list/chat_list.dart';
-import 'package:gaussinteract/widgets/chat_settings_popup_menu.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gaussinteract/pages/chat_list/chat_list.dart';
+import 'package:gaussinteract/widgets/chat_settings_popup_menu.dart';
 
 import '../utils/fluffy_chat_tester.dart';
 import 'auth_flows.dart';

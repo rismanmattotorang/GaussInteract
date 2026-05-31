@@ -4,12 +4,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:gaussinteract/utils/account_config.dart';
 import 'package:gaussinteract/utils/file_selector.dart';
 import 'package:gaussinteract/widgets/future_loading_dialog.dart';
 import 'package:gaussinteract/widgets/theme_builder.dart';
-import 'package:flutter/material.dart';
 
 import '../../widgets/matrix.dart';
 import 'settings_style_view.dart';

@@ -3,13 +3,13 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/pages/image_viewer/image_viewer_view.dart';
 import 'package:gaussinteract/utils/platform_infos.dart';
 import 'package:gaussinteract/utils/show_scaffold_dialog.dart';
 import 'package:gaussinteract/widgets/share_scaffold_dialog.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:matrix/matrix.dart';
 
 import '../../utils/matrix_sdk_extensions/event_extension.dart';

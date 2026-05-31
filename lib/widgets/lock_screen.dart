@@ -5,11 +5,11 @@
 
 import 'dart:async';
 
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/widgets/app_lock.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 class LockScreen extends StatefulWidget {
   const LockScreen({super.key});

@@ -3,9 +3,9 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import 'package:gaussinteract/config/app_config.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:gaussinteract/config/app_config.dart';
 
 class AdaptiveDialogAction extends StatelessWidget {
   final VoidCallback? onPressed;

@@ -5,6 +5,7 @@
 
 import 'dart:async';
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/pages/agent/agent_console.dart';
 import 'package:gaussinteract/pages/archive/archive.dart';
@@ -40,7 +41,6 @@ import 'package:gaussinteract/widgets/layouts/two_column_layout.dart';
 import 'package:gaussinteract/widgets/log_view.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
 import 'package:gaussinteract/widgets/share_scaffold_dialog.dart';
-import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:matrix/matrix.dart';
 

@@ -3,15 +3,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import 'package:flutter/material.dart';
-
-import 'package:go_router/go_router.dart';
-
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/agent/agent_approval_card.dart';
 import 'package:gaussinteract/pages/agent/agent_audit_view.dart';
 import 'package:gaussinteract/pages/agent/agent_capability_view.dart';
 import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
+import 'package:go_router/go_router.dart';
 
 /// The supervisor surface for AI agents (GaussInteract-SPECS §IV, §V.F):
 /// inline human-in-the-loop approval cards over the tamper-evident audit log.

@@ -6,10 +6,10 @@
 import 'dart:async';
 
 import 'package:async/async.dart';
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/localized_exception_extension.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/adaptive_dialog_action.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix_api_lite/utils/logs.dart';
 
 /// Displays a loading dialog which reacts to the given [future]. The dialog

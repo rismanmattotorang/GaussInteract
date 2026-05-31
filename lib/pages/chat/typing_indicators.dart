@@ -5,12 +5,12 @@
 
 import 'dart:async';
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/app_config.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/pages/chat/chat.dart';
 import 'package:gaussinteract/widgets/avatar.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
-import 'package:flutter/material.dart';
 
 class TypingIndicators extends StatelessWidget {
   final ChatController controller;

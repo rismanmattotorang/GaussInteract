@@ -5,11 +5,11 @@
 
 import 'dart:async';
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/invitation_selection/invitation_selection_view.dart';
 import 'package:gaussinteract/widgets/future_loading_dialog.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 import '../../utils/localized_exception_extension.dart';

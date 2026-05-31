@@ -6,8 +6,8 @@
 import 'dart:convert';
 
 import 'package:async/async.dart';
-import 'package:gaussinteract/utils/platform_infos.dart';
 import 'package:flutter/foundation.dart';
+import 'package:gaussinteract/utils/platform_infos.dart';
 import 'package:http/http.dart' as http;
 import 'package:matrix/matrix_api_lite/utils/logs.dart';
 import 'package:shared_preferences/shared_preferences.dart';

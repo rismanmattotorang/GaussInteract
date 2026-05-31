@@ -5,10 +5,10 @@
 
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/client_manager.dart';
 import 'package:gaussinteract/utils/platform_infos.dart';
-import 'package:flutter/foundation.dart';
 import 'package:matrix/matrix.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';

@@ -231,16 +231,16 @@ class GaussCapabilityGrant {
   /// Decode from `m.gauss.agent.capability` event content. Returns null if the
   /// content is malformed — the same fields the server re-validates (§IV.C).
   static GaussCapabilityGrant? fromContent(Map<String, Object?> content) {
-    final Object? agent = content['agent'];
-    final Object? rate = content['rate_limit_per_min'];
-    final Object? defaultClassValue = content['default_class'];
+    final agent = content['agent'];
+    final rate = content['rate_limit_per_min'];
+    final defaultClassValue = content['default_class'];
     if (agent is! String || rate is! int || defaultClassValue is! String) {
       return null;
     }
     final defaultClass = gaussActionClassFromWire(defaultClassValue);
     final allowedTools = _stringList(content['allowed_tools']);
     final accessibleRooms = _stringList(content['accessible_rooms']);
-    final Object? overridesValue = content['overrides'];
+    final overridesValue = content['overrides'];
     if (defaultClass == null ||
         allowedTools == null ||
         accessibleRooms == null ||
@@ -305,11 +305,11 @@ class GaussAuditRecord {
 
   /// Decode from the JSON object the SIEM stream emits, or null if malformed.
   static GaussAuditRecord? fromJson(Map<String, Object?> json) {
-    final Object? seq = json['seq'];
-    final Object? actor = json['actor'];
-    final Object? action = json['action'];
-    final Object? prevHash = json['prev_hash'];
-    final Object? hash = json['hash'];
+    final seq = json['seq'];
+    final actor = json['actor'];
+    final action = json['action'];
+    final prevHash = json['prev_hash'];
+    final hash = json['hash'];
     if (seq is! int ||
         actor is! String ||
         action is! String ||

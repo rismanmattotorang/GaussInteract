@@ -3,6 +3,8 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
@@ -10,8 +12,6 @@ import 'package:gaussinteract/pages/settings_notifications/push_rule_extensions.
 import 'package:gaussinteract/utils/push_helper.dart';
 import 'package:gaussinteract/widgets/layouts/max_width_body.dart';
 import 'package:gaussinteract/widgets/settings_switch_list_tile.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 import '../../utils/localized_exception_extension.dart';

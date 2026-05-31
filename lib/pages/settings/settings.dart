@@ -7,6 +7,7 @@ import 'dart:async';
 
 import 'package:collection/collection.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/file_selector.dart';
 import 'package:gaussinteract/utils/platform_infos.dart';
@@ -14,7 +15,6 @@ import 'package:gaussinteract/widgets/adaptive_dialogs/show_modal_action_popup.d
 import 'package:gaussinteract/widgets/adaptive_dialogs/show_ok_cancel_alert_dialog.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/show_text_input_dialog.dart';
 import 'package:gaussinteract/widgets/future_loading_dialog.dart';
-import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:matrix/encryption.dart';

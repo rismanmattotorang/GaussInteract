@@ -6,13 +6,13 @@
 import 'dart:convert';
 import 'dart:ui';
 
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/adaptive_dialog_action.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/show_ok_cancel_alert_dialog.dart';
 import 'package:gaussinteract/widgets/avatar.dart';
 import 'package:gaussinteract/widgets/future_loading_dialog.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:matrix/encryption.dart';
 import 'package:matrix/matrix.dart';
 

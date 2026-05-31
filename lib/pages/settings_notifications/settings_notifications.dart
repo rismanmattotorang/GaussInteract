@@ -5,6 +5,7 @@
 
 import 'dart:convert';
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/app_config.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/settings_notifications/push_rule_extensions.dart';
@@ -13,7 +14,6 @@ import 'package:gaussinteract/widgets/adaptive_dialogs/adaptive_dialog_action.da
 import 'package:gaussinteract/widgets/adaptive_dialogs/show_modal_action_popup.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/show_ok_cancel_alert_dialog.dart';
 import 'package:gaussinteract/widgets/future_loading_dialog.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 import '../../widgets/matrix.dart';

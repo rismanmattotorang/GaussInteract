@@ -5,13 +5,13 @@
 
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:gaussinteract/utils/matrix_sdk_extensions/oidc_session_json_extension.dart';
 import 'package:gaussinteract/utils/platform_infos.dart';
 import 'package:gaussinteract/utils/sign_in_flows/calc_redirect_url.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 import 'package:matrix/matrix.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 

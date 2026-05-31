@@ -5,6 +5,7 @@
 
 import 'dart:math';
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/chat/events/poll.dart';
@@ -16,7 +17,6 @@ import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
 import 'package:gaussinteract/utils/matrix_sdk_extensions/matrix_locals.dart';
 import 'package:gaussinteract/widgets/avatar.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
-import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:matrix/encryption.dart';
 import 'package:matrix/matrix.dart';

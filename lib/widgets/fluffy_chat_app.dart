@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/app_config.dart';
 import 'package:gaussinteract/config/routes.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
@@ -10,7 +11,6 @@ import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/widgets/app_lock.dart';
 import 'package:gaussinteract/widgets/theme_builder.dart';
-import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:matrix/matrix.dart';
 import 'package:shared_preferences/shared_preferences.dart';

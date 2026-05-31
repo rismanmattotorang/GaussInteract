@@ -5,12 +5,12 @@
 
 import 'dart:async';
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/show_ok_cancel_alert_dialog.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/show_text_input_dialog.dart';
 import 'package:gaussinteract/widgets/fluffy_chat_app.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 import 'package:url_launcher/url_launcher.dart';
 

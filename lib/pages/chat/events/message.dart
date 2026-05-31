@@ -6,20 +6,20 @@
 import 'dart:ui' as ui;
 
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
-import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/adaptive_bottom_sheet.dart';
 import 'package:gaussinteract/utils/date_time_extension.dart';
 import 'package:gaussinteract/utils/file_description.dart';
+import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
 import 'package:gaussinteract/utils/matrix_sdk_extensions/matrix_locals.dart';
 import 'package:gaussinteract/utils/string_color.dart';
 import 'package:gaussinteract/widgets/avatar.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
 import 'package:gaussinteract/widgets/member_actions_popup_menu_button.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:matrix/matrix.dart';
 import 'package:swipe_to_action/swipe_to_action.dart';
 

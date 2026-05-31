@@ -3,8 +3,8 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import 'package:gaussinteract/pages/sign_in/view_model/model/public_homeserver_data.dart';
 import 'package:flutter/material.dart';
+import 'package:gaussinteract/pages/sign_in/view_model/model/public_homeserver_data.dart';
 
 class SignInState {
   final PublicHomeserverData? selectedHomeserver;

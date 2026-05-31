@@ -3,13 +3,13 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/app_config.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/pages/chat_list/chat_list.dart';
 import 'package:gaussinteract/pages/chat_list/start_chat_fab.dart';
 import 'package:gaussinteract/widgets/navigation_rail.dart';
-import 'package:flutter/material.dart';
 
 import 'chat_list_body.dart';
 

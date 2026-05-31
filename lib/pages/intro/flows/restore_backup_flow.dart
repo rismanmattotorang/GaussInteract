@@ -3,10 +3,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/utils/file_selector.dart';
 import 'package:gaussinteract/widgets/future_loading_dialog.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
-import 'package:flutter/material.dart';
 
 Future<void> restoreBackupFlow(BuildContext context) async {
   final matrix = Matrix.of(context);

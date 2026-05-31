@@ -5,12 +5,12 @@
 
 import 'dart:async';
 
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/chat/events/map_bubble.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/adaptive_dialog_action.dart';
 import 'package:gaussinteract/widgets/future_loading_dialog.dart';
-import 'package:flutter/cupertino.dart';
-import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:matrix/matrix.dart';
 

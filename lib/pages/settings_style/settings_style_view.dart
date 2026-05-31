@@ -6,6 +6,7 @@
 import 'dart:ui';
 
 import 'package:dynamic_color/dynamic_color.dart';
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
@@ -16,7 +17,6 @@ import 'package:gaussinteract/widgets/avatar.dart';
 import 'package:gaussinteract/widgets/layouts/max_width_body.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
 import 'package:gaussinteract/widgets/mxc_image.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 import '../../config/app_config.dart';

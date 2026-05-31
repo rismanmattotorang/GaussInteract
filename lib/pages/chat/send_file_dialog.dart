@@ -5,6 +5,8 @@
 
 import 'package:async/async.dart' show Result;
 import 'package:cross_file/cross_file.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/app_config.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/chat/trust_user_key_dialog.dart';
@@ -15,8 +17,6 @@ import 'package:gaussinteract/utils/size_string.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/adaptive_dialog_action.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/dialog_text_field.dart';
 import 'package:gaussinteract/widgets/future_loading_dialog.dart';
-import 'package:flutter/cupertino.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart' hide Result;
 import 'package:mime/mime.dart';
 

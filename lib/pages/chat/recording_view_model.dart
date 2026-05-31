@@ -6,13 +6,13 @@
 import 'dart:async';
 
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/platform_infos.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/show_ok_cancel_alert_dialog.dart';
-import 'package:flutter/cupertino.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 import 'package:path/path.dart' as path_lib;
 import 'package:path_provider/path_provider.dart';

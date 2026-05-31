@@ -3,10 +3,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import 'package:gaussinteract/config/app_config.dart';
-import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:gaussinteract/config/app_config.dart';
+import 'package:gaussinteract/config/setting_keys.dart';
 
 abstract class FluffyThemes {
   static const double columnWidth = 380.0;

@@ -3,11 +3,11 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
+import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/url_launcher.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/adaptive_dialog_action.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter_linkify/flutter_linkify.dart';
 
 enum OkCancelResult { ok, cancel }
 

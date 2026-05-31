@@ -6,10 +6,10 @@
 import 'dart:io';
 import 'dart:math';
 
-import 'package:gaussinteract/l10n/l10n.dart';
-import 'package:gaussinteract/utils/other_party_can_receive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:gaussinteract/l10n/l10n.dart';
+import 'package:gaussinteract/utils/other_party_can_receive.dart';
 import 'package:http/http.dart';
 import 'package:matrix/encryption.dart';
 import 'package:matrix/matrix.dart';

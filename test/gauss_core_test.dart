@@ -2,8 +2,8 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
 
 void main() {
   group('GaussCore agent surface (stub)', () {

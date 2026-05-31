@@ -6,6 +6,7 @@
 import 'dart:ui' as ui;
 
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
@@ -21,7 +22,6 @@ import 'package:gaussinteract/widgets/chat_settings_popup_menu.dart';
 import 'package:gaussinteract/widgets/future_loading_dialog.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
 import 'package:gaussinteract/widgets/mxc_image.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 import '../../utils/stream_extension.dart';

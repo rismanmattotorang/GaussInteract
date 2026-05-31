@@ -5,6 +5,8 @@
 
 import 'dart:math';
 
+import 'package:flutter/material.dart';
+import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:gaussinteract/config/app_config.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:gaussinteract/pages/chat/events/file_send_status_indicator.dart';
@@ -14,8 +16,6 @@ import 'package:gaussinteract/utils/platform_infos.dart';
 import 'package:gaussinteract/utils/url_launcher.dart';
 import 'package:gaussinteract/widgets/blur_hash.dart';
 import 'package:gaussinteract/widgets/mxc_image.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:matrix/matrix.dart';
 
 import '../../image_viewer/image_viewer.dart';

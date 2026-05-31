@@ -7,6 +7,9 @@ import 'dart:async';
 
 import 'package:collection/collection.dart';
 import 'package:cross_file/cross_file.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_shortcuts_new/flutter_shortcuts_new.dart';
 import 'package:gaussinteract/config/app_config.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/chat_list/chat_list_view.dart';
@@ -22,9 +25,6 @@ import 'package:gaussinteract/widgets/adaptive_dialogs/show_text_input_dialog.da
 import 'package:gaussinteract/widgets/avatar.dart';
 import 'package:gaussinteract/widgets/future_loading_dialog.dart';
 import 'package:gaussinteract/widgets/share_scaffold_dialog.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_shortcuts_new/flutter_shortcuts_new.dart';
 import 'package:go_router/go_router.dart';
 import 'package:matrix/matrix.dart' as sdk;
 import 'package:matrix/matrix.dart';

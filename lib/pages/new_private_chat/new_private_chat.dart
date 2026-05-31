@@ -6,6 +6,8 @@
 import 'dart:async';
 
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/new_private_chat/new_private_chat_view.dart';
 import 'package:gaussinteract/pages/new_private_chat/qr_scanner_modal.dart';
@@ -14,8 +16,6 @@ import 'package:gaussinteract/utils/fluffy_share.dart';
 import 'package:gaussinteract/utils/platform_infos.dart';
 import 'package:gaussinteract/utils/url_launcher.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:matrix/matrix.dart';
 
 import '../../widgets/adaptive_dialogs/user_dialog.dart';

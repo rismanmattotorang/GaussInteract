@@ -12,13 +12,13 @@ import 'dart:isolate';
 import 'dart:ui';
 
 //<GOOGLE_SERVICES>import 'package:fcm_shared_isolate/fcm_shared_isolate.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/main.dart';
 import 'package:gaussinteract/utils/notification_background_handler.dart';
 import 'package:gaussinteract/utils/push_helper.dart';
 import 'package:gaussinteract/widgets/fluffy_chat_app.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:http/http.dart' as http;
 import 'package:matrix/matrix.dart';
 import 'package:unifiedpush/unifiedpush.dart';

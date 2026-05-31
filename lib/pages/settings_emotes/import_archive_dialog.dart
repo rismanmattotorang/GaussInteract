@@ -7,13 +7,13 @@ import 'dart:async';
 
 import 'package:archive/archive.dart';
 import 'package:collection/collection.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/settings_emotes/settings_emotes.dart';
 import 'package:gaussinteract/utils/client_manager.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/show_ok_cancel_alert_dialog.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:matrix/matrix.dart';
 
 class ImportEmoteArchiveDialog extends StatefulWidget {

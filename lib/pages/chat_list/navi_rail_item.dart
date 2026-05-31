@@ -4,10 +4,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import 'package:badges/badges.dart';
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/app_config.dart';
 import 'package:gaussinteract/widgets/hover_builder.dart';
 import 'package:gaussinteract/widgets/unread_rooms_badge.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 import '../../config/themes.dart';

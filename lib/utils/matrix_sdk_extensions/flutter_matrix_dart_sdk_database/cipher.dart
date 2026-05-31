@@ -6,12 +6,12 @@
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:gaussinteract/config/setting_keys.dart';
-import 'package:gaussinteract/l10n/l10n.dart';
-import 'package:gaussinteract/utils/client_manager.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:gaussinteract/config/setting_keys.dart';
+import 'package:gaussinteract/l10n/l10n.dart';
+import 'package:gaussinteract/utils/client_manager.dart';
 import 'package:matrix/matrix.dart';
 
 const _passwordStorageKey = 'database_password';

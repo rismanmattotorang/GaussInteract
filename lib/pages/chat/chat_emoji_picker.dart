@@ -4,11 +4,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/chat/sticker_picker_dialog.dart';
 import 'package:gaussinteract/pages/chat/trust_user_key_dialog.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 import 'chat.dart';

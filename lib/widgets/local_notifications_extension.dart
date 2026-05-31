@@ -3,6 +3,9 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/client_download_content_extension.dart';
@@ -10,9 +13,6 @@ import 'package:gaussinteract/utils/matrix_sdk_extensions/matrix_locals.dart';
 import 'package:gaussinteract/utils/notification_background_handler.dart';
 import 'package:gaussinteract/utils/push_helper.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:matrix/matrix.dart';
 import 'package:universal_html/html.dart' as html;
 

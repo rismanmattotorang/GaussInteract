@@ -5,9 +5,9 @@
 
 import 'dart:math';
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/app_config.dart';
 import 'package:gaussinteract/config/themes.dart';
-import 'package:flutter/material.dart';
 
 Future<T?> showAdaptiveBottomSheet<T>({
   required BuildContext context,

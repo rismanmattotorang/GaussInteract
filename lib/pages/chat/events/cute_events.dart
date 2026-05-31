@@ -5,9 +5,9 @@
 
 import 'dart:math';
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 class CuteContent extends StatefulWidget {

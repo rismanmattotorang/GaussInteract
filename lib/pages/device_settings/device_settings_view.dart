@@ -3,11 +3,11 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/themes.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/device_settings/device_settings.dart';
 import 'package:gaussinteract/widgets/layouts/max_width_body.dart';
-import 'package:flutter/material.dart';
 
 import 'user_device_list_item.dart';
 

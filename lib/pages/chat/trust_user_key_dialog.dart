@@ -3,13 +3,13 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/key_verification/key_verification_dialog.dart';
 import 'package:gaussinteract/utils/beautify_string_extension.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/adaptive_dialog_action.dart';
 import 'package:gaussinteract/widgets/adaptive_dialogs/dialog_text_field.dart';
 import 'package:gaussinteract/widgets/avatar.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 Future<bool> showTrustUserInRoomDialog(BuildContext context, Room room) async {

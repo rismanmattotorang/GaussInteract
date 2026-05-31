@@ -163,7 +163,7 @@ class _ClassChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final (Color bg, Color fg, String label) = switch (actionClass) {
+    final (bg, fg, label) = switch (actionClass) {
       GaussActionClass.auto => (
         colors.primaryContainer,
         colors.onPrimaryContainer,

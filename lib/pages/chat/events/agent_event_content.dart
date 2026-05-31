@@ -3,11 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import 'package:flutter/material.dart';
-
-import 'package:matrix/matrix.dart';
-
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
+import 'package:matrix/matrix.dart';
 
 /// Renders an agent's `m.gauss.agent.tool_call` / `m.gauss.agent.tool_result`
 /// event as a first-class, inline timeline bubble (GaussInteract-SPECS §IV.B,

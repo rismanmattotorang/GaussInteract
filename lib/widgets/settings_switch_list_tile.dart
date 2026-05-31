@@ -3,8 +3,8 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import 'package:gaussinteract/config/setting_keys.dart';
 import 'package:flutter/material.dart';
+import 'package:gaussinteract/config/setting_keys.dart';
 
 class SettingsSwitchListTile extends StatefulWidget {
   final AppSettings<bool> setting;

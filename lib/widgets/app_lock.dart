@@ -3,9 +3,9 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import 'package:gaussinteract/widgets/lock_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:gaussinteract/widgets/lock_screen.dart';
 import 'package:matrix/matrix.dart';
 import 'package:provider/provider.dart';
 

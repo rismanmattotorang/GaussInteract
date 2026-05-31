@@ -3,6 +3,8 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
+import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/chat_details/chat_details.dart';
 import 'package:gaussinteract/pages/chat_details/participant_list_item.dart';
@@ -12,8 +14,6 @@ import 'package:gaussinteract/widgets/avatar.dart';
 import 'package:gaussinteract/widgets/chat_settings_popup_menu.dart';
 import 'package:gaussinteract/widgets/layouts/max_width_body.dart';
 import 'package:gaussinteract/widgets/matrix.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:go_router/go_router.dart';
 import 'package:matrix/matrix.dart';
 

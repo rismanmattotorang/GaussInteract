@@ -5,12 +5,12 @@
 
 import 'dart:convert';
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/config/app_config.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/utils/adaptive_bottom_sheet.dart';
 import 'package:gaussinteract/utils/date_time_extension.dart';
 import 'package:gaussinteract/widgets/avatar.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 extension EventInfoDialogExtension on Event {

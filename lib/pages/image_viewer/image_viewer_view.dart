@@ -3,12 +3,12 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import 'package:flutter/material.dart';
 import 'package:gaussinteract/l10n/l10n.dart';
 import 'package:gaussinteract/pages/image_viewer/video_player.dart';
 import 'package:gaussinteract/utils/platform_infos.dart';
 import 'package:gaussinteract/widgets/hover_builder.dart';
 import 'package:gaussinteract/widgets/mxc_image.dart';
-import 'package:flutter/material.dart';
 import 'package:matrix/matrix.dart';
 
 import 'image_viewer.dart';
