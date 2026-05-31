@@ -20,15 +20,17 @@ pub enum ActionClass {
     Forbidden,
 }
 
+use gm_util::{AgentId, RoomId};
+
 /// An agent's least-privilege capability grant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityGrant {
     /// The agent (a cross-signed Matrix identity) this grant scopes.
-    pub agent: String,
+    pub agent: AgentId,
     /// Tools the agent may call at all.
     pub allowed_tools: Vec<String>,
     /// Rooms the agent may access.
-    pub accessible_rooms: Vec<String>,
+    pub accessible_rooms: Vec<RoomId>,
     /// Maximum tool calls per minute (0 = unlimited).
     pub rate_limit_per_min: u32,
     /// Default classification for tools without an explicit override.
@@ -39,9 +41,9 @@ pub struct CapabilityGrant {
 
 impl CapabilityGrant {
     /// A deny-all grant; tools and rooms are added explicitly (least privilege).
-    pub fn deny_all(agent: impl Into<String>) -> Self {
+    pub fn deny_all(agent: AgentId) -> Self {
         Self {
-            agent: agent.into(),
+            agent,
             allowed_tools: Vec::new(),
             accessible_rooms: Vec::new(),
             rate_limit_per_min: 0,
@@ -61,8 +63,8 @@ impl CapabilityGrant {
     }
 
     /// Grant access to a room (builder-style).
-    pub fn allow_room(mut self, room: impl Into<String>) -> Self {
-        self.accessible_rooms.push(room.into());
+    pub fn allow_room(mut self, room: RoomId) -> Self {
+        self.accessible_rooms.push(room);
         self
     }
 
@@ -78,13 +80,13 @@ impl CapabilityGrant {
     }
 
     /// Whether the agent may access `room`.
-    pub fn permits_room(&self, room: &str) -> bool {
+    pub fn permits_room(&self, room: &RoomId) -> bool {
         self.accessible_rooms.iter().any(|r| r == room)
     }
 
     /// Classify a tool invocation in `room`. A tool that is not allowed, or a
     /// room that is not accessible, resolves to [`ActionClass::Forbidden`].
-    pub fn classify(&self, tool: &str, room: &str) -> ActionClass {
+    pub fn classify(&self, tool: &str, room: &RoomId) -> ActionClass {
         if !self.permits_room(room) || !self.permits_tool(tool) {
             return ActionClass::Forbidden;
         }
@@ -102,27 +104,17 @@ mod tests {
 
     #[test]
     fn builder_produces_least_privilege_grant() {
-        let grant = CapabilityGrant::deny_all("@assistant:gaussian.tech")
-            .allow_room("!room:gaussian.tech")
+        let room = RoomId::parse("!room:gaussian.tech").unwrap();
+        let other = RoomId::parse("!other:gaussian.tech").unwrap();
+        let grant = CapabilityGrant::deny_all(AgentId::parse("@assistant:gaussian.tech").unwrap())
+            .allow_room(room.clone())
             .allow_tool("search", ActionClass::Auto)
             .allow_tool("send_email", ActionClass::Review)
             .with_rate_limit(30);
 
-        assert_eq!(
-            grant.classify("search", "!room:gaussian.tech"),
-            ActionClass::Auto
-        );
-        assert_eq!(
-            grant.classify("send_email", "!room:gaussian.tech"),
-            ActionClass::Review
-        );
-        assert_eq!(
-            grant.classify("rm_rf", "!room:gaussian.tech"),
-            ActionClass::Forbidden
-        );
-        assert_eq!(
-            grant.classify("search", "!other:gaussian.tech"),
-            ActionClass::Forbidden
-        );
+        assert_eq!(grant.classify("search", &room), ActionClass::Auto);
+        assert_eq!(grant.classify("send_email", &room), ActionClass::Review);
+        assert_eq!(grant.classify("rm_rf", &room), ActionClass::Forbidden);
+        assert_eq!(grant.classify("search", &other), ActionClass::Forbidden);
     }
 }

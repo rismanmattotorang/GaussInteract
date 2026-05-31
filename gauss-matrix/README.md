@@ -49,9 +49,10 @@ gauss-matrix/
             └── error.rs      # the common GmError
 ```
 
-The gateway validates inbound agent/room identifiers through `gm-util` before
-mediating — agents and rooms are principals, so malformed ids are refused (and
-audited) before they reach classification or the room.
+Agent and room identifiers are validated through `gm-util` at the system's edge
+— `ToolCall::parse` rejects a malformed id before a call can even be constructed
+— so `CapabilityGrant` and the gateway work entirely in terms of typed
+`AgentId` / `RoomId`, and mediation never has to defend against bad identifiers.
 
 ### What `gm-agent` already does
 

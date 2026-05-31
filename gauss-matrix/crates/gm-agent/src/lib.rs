@@ -56,7 +56,6 @@ use crate::clock::{Clock, SystemClock};
 use crate::events::ReflectedEvent;
 use crate::mcp::{ToolCall, ToolExecutor};
 use gm_store::{audit, MemoryStore, Store};
-use gm_util::{AgentId, RoomId};
 use std::fmt;
 
 /// The rate-limit window: tool calls per agent are counted over this many
@@ -227,30 +226,13 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
         call: ToolCall,
         executor: &mut E,
     ) -> Outcome {
-        // Agents and rooms are principals: reject malformed identifiers before
-        // anything else, so they never reach classification or the room.
-        if AgentId::parse(&call.agent).is_err() || RoomId::parse(&call.room).is_err() {
-            audit::append(
-                &mut self.store,
-                &call.agent,
-                &format!(
-                    "rejected_identifier: agent={} room={}",
-                    call.agent, call.room
-                ),
-            );
-            return Outcome::Denied {
-                reason: format!(
-                    "malformed agent or room identifier (agent={}, room={})",
-                    call.agent, call.room
-                ),
-                events: Vec::new(),
-            };
-        }
+        // Identifiers were validated when the ToolCall was constructed
+        // (gm_util AgentId/RoomId), so mediation can trust them.
         let class = grant.classify(&call.tool, &call.room);
         if class == ActionClass::Forbidden {
             audit::append(
                 &mut self.store,
-                &call.agent,
+                call.agent.as_str(),
                 &format!("denied_by_scope: {} in {}", call.tool, call.room),
             );
             return Outcome::Denied {
@@ -258,10 +240,10 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 events: Vec::new(),
             };
         }
-        if self.is_rate_limited(&call.agent, grant.rate_limit_per_min) {
+        if self.is_rate_limited(call.agent.as_str(), grant.rate_limit_per_min) {
             audit::append(
                 &mut self.store,
-                &call.agent,
+                call.agent.as_str(),
                 &format!("rate_limited: {}", call.tool),
             );
             return Outcome::Denied {
@@ -272,14 +254,14 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 events: Vec::new(),
             };
         }
-        self.note_call(&call.agent);
+        self.note_call(call.agent.as_str());
         match class {
             ActionClass::Forbidden => unreachable!("handled above"),
             ActionClass::Auto => {
                 let call_id = self.next_call_id();
                 audit::append(
                     &mut self.store,
-                    &call.agent,
+                    call.agent.as_str(),
                     &format!("auto_allowed: {}", call.tool),
                 );
                 let call_event =
@@ -287,7 +269,7 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 let outcome = executor.execute(&call);
                 audit::append(
                     &mut self.store,
-                    &call.agent,
+                    call.agent.as_str(),
                     &format!("executed: {} ok={}", call.tool, outcome.ok),
                 );
                 let result_event =
@@ -302,7 +284,7 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 self.next_request_id += 1;
                 audit::append(
                     &mut self.store,
-                    &call.agent,
+                    call.agent.as_str(),
                     &format!("approval_requested: {}", call.tool),
                 );
                 let call_event =
@@ -339,13 +321,13 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
         if approved {
             audit::append(
                 &mut self.store,
-                &pending.call.agent,
+                pending.call.agent.as_str(),
                 &format!("approved_by {}: {}", decided_by, pending.call.tool),
             );
             let outcome = executor.execute(&pending.call);
             audit::append(
                 &mut self.store,
-                &pending.call.agent,
+                pending.call.agent.as_str(),
                 &format!("executed: {} ok={}", pending.call.tool, outcome.ok),
             );
             let result_event = ReflectedEvent::tool_result(
@@ -360,7 +342,7 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
         } else {
             audit::append(
                 &mut self.store,
-                &pending.call.agent,
+                pending.call.agent.as_str(),
                 &format!("denied_by {}: {}", decided_by, pending.call.tool),
             );
             Ok(Outcome::Denied {
@@ -379,22 +361,21 @@ mod tests {
     use crate::events::TYPE_TOOL_CALL;
     use crate::mcp::EchoExecutor;
     use gm_store::MemoryStore;
+    use gm_util::{AgentId, RoomId};
+
+    const AGENT: &str = "@assistant:gaussian.tech";
+    const ROOM: &str = "!room:gaussian.tech";
 
     fn grant() -> CapabilityGrant {
-        CapabilityGrant::deny_all("@assistant:gaussian.tech")
-            .allow_room("!room:gaussian.tech")
+        CapabilityGrant::deny_all(AgentId::parse(AGENT).unwrap())
+            .allow_room(RoomId::parse(ROOM).unwrap())
             .allow_tool("search", ActionClass::Auto)
             .allow_tool("send_email", ActionClass::Review)
             .with_rate_limit(30)
     }
 
     fn call(tool: &str) -> ToolCall {
-        ToolCall::new(
-            "@assistant:gaussian.tech",
-            "!room:gaussian.tech",
-            tool,
-            "args",
-        )
+        ToolCall::parse(AGENT, ROOM, tool, "args").unwrap()
     }
 
     fn gateway_at(secs: u64) -> AgentGateway<MemoryStore, ManualClock> {
@@ -482,13 +463,13 @@ mod tests {
 
     #[test]
     fn rate_limit_blocks_excess_calls_then_recovers_after_window() {
-        let grant = CapabilityGrant::deny_all("@a:gaussian.tech")
-            .allow_room("!r:gaussian.tech")
+        let grant = CapabilityGrant::deny_all(AgentId::parse(AGENT).unwrap())
+            .allow_room(RoomId::parse(ROOM).unwrap())
             .allow_tool("search", ActionClass::Auto)
             .with_rate_limit(2);
         let mut gw = gateway_at(1_000);
         let mut exec = EchoExecutor;
-        let c = || ToolCall::new("@a:gaussian.tech", "!r:gaussian.tech", "search", "q");
+        let c = || ToolCall::parse(AGENT, ROOM, "search", "q").unwrap();
 
         // Two calls fit the budget.
         assert!(matches!(
@@ -518,15 +499,14 @@ mod tests {
 
     #[test]
     fn zero_rate_limit_means_unlimited() {
-        let grant = CapabilityGrant::deny_all("@a:gaussian.tech")
-            .allow_room("!r:gaussian.tech")
+        let grant = CapabilityGrant::deny_all(AgentId::parse(AGENT).unwrap())
+            .allow_room(RoomId::parse(ROOM).unwrap())
             .allow_tool("search", ActionClass::Auto); // rate_limit defaults to 0
         let mut gw = gateway_at(1_000);
         let mut exec = EchoExecutor;
         for _ in 0..5 {
-            let c = ToolCall::new("@a:gaussian.tech", "!r:gaussian.tech", "search", "q");
             assert!(matches!(
-                gw.handle(&grant, c, &mut exec),
+                gw.handle(&grant, call("search"), &mut exec),
                 Outcome::Executed { .. }
             ));
         }
@@ -534,40 +514,35 @@ mod tests {
 
     #[test]
     fn forbidden_tool_does_not_consume_rate_budget() {
-        let grant = CapabilityGrant::deny_all("@a:gaussian.tech")
-            .allow_room("!r:gaussian.tech")
+        let grant = CapabilityGrant::deny_all(AgentId::parse(AGENT).unwrap())
+            .allow_room(RoomId::parse(ROOM).unwrap())
             .allow_tool("search", ActionClass::Auto)
             .with_rate_limit(1);
         let mut gw = gateway_at(1_000);
         let mut exec = EchoExecutor;
         // A forbidden tool is refused by scope and must not spend the budget.
-        let forbidden = ToolCall::new("@a:gaussian.tech", "!r:gaussian.tech", "rm_rf", "q");
         assert!(matches!(
-            gw.handle(&grant, forbidden, &mut exec),
+            gw.handle(&grant, call("rm_rf"), &mut exec),
             Outcome::Denied { .. }
         ));
         // The single allowed call still goes through.
-        let allowed = ToolCall::new("@a:gaussian.tech", "!r:gaussian.tech", "search", "q");
         assert!(matches!(
-            gw.handle(&grant, allowed, &mut exec),
+            gw.handle(&grant, call("search"), &mut exec),
             Outcome::Executed { .. }
         ));
     }
 
     #[test]
-    fn malformed_identifiers_are_rejected_before_classification() {
+    fn identifiers_are_validated_at_construction() {
+        // Malformed ids can no longer reach the gateway: they fail to parse.
+        assert!(ToolCall::parse(AGENT, "not-a-room", "search", "q").is_err());
+        // A well-formed call mediates normally.
         let mut gw = AgentGateway::new();
         let mut exec = EchoExecutor;
-        // Room id missing its `!` sigil — refused before scope/rate checks.
-        let bad_room = ToolCall::new("@assistant:gaussian.tech", "not-a-room", "search", "q");
-        match gw.handle(&grant(), bad_room, &mut exec) {
-            Outcome::Denied { reason, events } => {
-                assert!(reason.contains("identifier"));
-                assert!(events.is_empty());
-            }
-            other => panic!("expected Denied, got {other:?}"),
-        }
-        assert_eq!(gw.audit_entries().len(), 1);
+        assert!(matches!(
+            gw.handle(&grant(), call("search"), &mut exec),
+            Outcome::Executed { .. }
+        ));
         assert_eq!(gw.verify_audit(), Ok(()));
     }
 }

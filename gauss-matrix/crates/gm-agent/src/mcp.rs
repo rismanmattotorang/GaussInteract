@@ -9,13 +9,17 @@
 //! the result a tool executor returns. The live MCP transport (stdio / HTTP+SSE)
 //! is wired behind the `mcp` feature.
 
-/// An inbound tool invocation from an agent over MCP.
+use gm_util::{AgentId, GmError, RoomId};
+
+/// An inbound tool invocation from an agent over MCP. The agent and room are
+/// validated [`AgentId`] / [`RoomId`] — a malformed call cannot be constructed,
+/// so the gateway never has to defend against bad identifiers at mediation time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCall {
     /// The agent (a cross-signed Matrix identity) making the call.
-    pub agent: String,
+    pub agent: AgentId,
     /// The room the call targets.
-    pub room: String,
+    pub room: RoomId,
     /// The MCP tool being invoked.
     pub tool: String,
     /// A human-readable rendering of the arguments (shown inline to humans).
@@ -23,19 +27,35 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
-    /// Construct an inbound tool call.
+    /// Construct from already-validated identifiers.
     pub fn new(
-        agent: impl Into<String>,
-        room: impl Into<String>,
+        agent: AgentId,
+        room: RoomId,
         tool: impl Into<String>,
         args_summary: impl Into<String>,
     ) -> Self {
         Self {
-            agent: agent.into(),
-            room: room.into(),
+            agent,
+            room,
             tool: tool.into(),
             args_summary: args_summary.into(),
         }
+    }
+
+    /// Parse the raw identifiers received over MCP, validating them. A malformed
+    /// agent or room id is rejected here, at the system's edge.
+    pub fn parse(
+        agent: &str,
+        room: &str,
+        tool: impl Into<String>,
+        args_summary: impl Into<String>,
+    ) -> Result<Self, GmError> {
+        Ok(Self::new(
+            AgentId::parse(agent)?,
+            RoomId::parse(room)?,
+            tool,
+            args_summary,
+        ))
     }
 }
 
@@ -66,5 +86,19 @@ impl ToolExecutor for EchoExecutor {
             ok: true,
             summary: format!("executed {} ({})", call.tool, call.args_summary),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_validates_identifiers_at_the_edge() {
+        assert!(ToolCall::parse("@a:gaussian.tech", "!r:gaussian.tech", "search", "q").is_ok());
+        // Room id missing its `!` sigil is rejected before construction.
+        assert!(ToolCall::parse("@a:gaussian.tech", "not-a-room", "search", "q").is_err());
+        // Agent id missing its `@` sigil is rejected too.
+        assert!(ToolCall::parse("a:gaussian.tech", "!r:gaussian.tech", "search", "q").is_err());
     }
 }
