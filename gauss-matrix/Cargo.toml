@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+#
+# GaussMatrix — a sovereign, horizontally scalable, Rust-native Matrix
+# homeserver (GaussInteract-SPECS §III). It is specified as an eleven-crate
+# workspace; this tree is being built crate-by-crate. `gm-agent` (the agentic
+# AI gateway, §IV) is the first crate, since it is the platform's most
+# distinctive contribution and the producer of the m.gauss.agent.* events the
+# GaussInteract client already renders.
+
+[workspace]
+resolver = "2"
+members = ["crates/gm-agent"]
+# Remaining crates from the spec's decomposition (§III.B), added as implemented:
+#   gm-http   CS/SS/AS ingress (axum/hyper)
+#   gm-api    typed request/response model (extends ruma)
+#   gm-svc    service core: rooms, sync, devices, push, account data
+#   gm-stateres parallel state-resolution engine (room versions 1–12)
+#   gm-fed    federation sender/receiver, partial-state joins, backfill
+#   gm-e2ee   key relay, cross-signing, key backup (no plaintext)
+#   gm-store  pluggable storage trait + column-family schema
+#   gm-shard  room placement, coordination and rebalancing
+#   gm-agent  the agentic gateway (this crate)
+#   gm-obs    metrics, tracing, structured audit emission
+#   gm-util   shared primitives
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.78"
+# The server core is specified to carry a permissive licence enabling
+# commercial derivatives (§VII); the Tuwunel/Conduit lineage it adopts is
+# Apache-2.0. This is distinct from the AGPL-3.0 GaussInteract client.
+license = "Apache-2.0"
+repository = "https://github.com/rismanmattotorang/gaussinteract"

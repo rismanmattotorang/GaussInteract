@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+#
+# CI for the GaussMatrix server workspace. Realises the supply-chain gates of
+# GaussInteract-SPECS §VI.C: formatting, lints, tests, and cargo-deny
+# (licences / advisories / bans / sources).
+
+name: gauss-matrix
+
+on:
+  push:
+    branches: [main]
+    paths: ["gauss-matrix/**", ".github/workflows/gauss-matrix.yaml"]
+  pull_request:
+    paths: ["gauss-matrix/**", ".github/workflows/gauss-matrix.yaml"]
+  merge_group:
+
+defaults:
+  run:
+    working-directory: gauss-matrix
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gauss-matrix/target
+          key: gauss-matrix-${{ runner.os }}-${{ hashFiles('gauss-matrix/Cargo.lock') }}
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --all-features --locked
+      - name: Build (release)
+        run: cargo build --release --locked
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: cargo-deny (licences, advisories, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: gauss-matrix/Cargo.toml
+          command: check

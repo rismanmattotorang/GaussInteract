@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

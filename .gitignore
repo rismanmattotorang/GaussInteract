@@ -78,3 +78,7 @@ gauss-core/target/
 **/*.rs.bk
 # NB: gauss-core/Cargo.lock IS committed — GaussInteract-SPECS §VI.C mandates a
 # pinned dependency tree and reproducible builds.
+
+# Rust (gauss-matrix server)
+gauss-matrix/target/
+# NB: gauss-matrix/Cargo.lock IS committed (reproducible builds, §VI.C).
