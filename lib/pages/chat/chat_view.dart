@@ -227,6 +227,12 @@ class ChatView extends StatelessWidget {
                         icon: const Icon(Icons.call_outlined),
                         tooltip: L10n.of(context).placeCall,
                       ),
+                    if (controller.showAgentDevTools)
+                      IconButton(
+                        onPressed: controller.sendTestAgentEventsAction,
+                        icon: const Icon(Icons.smart_toy_outlined),
+                        tooltip: 'Send test agent events (dev)',
+                      ),
                     ChatSettingsPopupMenu(controller.room, true),
                   ],
                 ],

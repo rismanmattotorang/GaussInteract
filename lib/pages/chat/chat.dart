@@ -23,6 +23,7 @@ import 'package:gaussinteract/pages/chat_details/chat_details.dart';
 import 'package:gaussinteract/utils/adaptive_bottom_sheet.dart';
 import 'package:gaussinteract/utils/error_reporter.dart';
 import 'package:gaussinteract/utils/file_selector.dart';
+import 'package:gaussinteract/utils/gauss_core/gauss_core.dart';
 import 'package:gaussinteract/utils/matrix_sdk_extensions/event_extension.dart';
 import 'package:gaussinteract/utils/matrix_sdk_extensions/filtered_timeline_extension.dart';
 import 'package:gaussinteract/utils/matrix_sdk_extensions/matrix_locals.dart';
@@ -1342,6 +1343,35 @@ class ChatController extends State<ChatPageWithRoom>
   void onInputBarSubmitted(String _) {
     send();
     FocusScope.of(context).requestFocus(inputFocus);
+  }
+
+  /// Whether to surface in-app developer tooling (debug builds only).
+  bool get showAgentDevTools => kDebugMode;
+
+  /// Dev-only: post a sample `m.gauss.agent.tool_call` followed by a matching
+  /// `m.gauss.agent.tool_result` into the current room so the inline agent
+  /// bubbles (GaussInteract-SPECS §IV.B, §V.D) can be seen live, ahead of the
+  /// real `gm-agent` gateway. In production these events originate from the
+  /// gateway as the agent's own cross-signed identity, not the local user.
+  Future<void> sendTestAgentEventsAction() async {
+    final callId = 'dev-${DateTime.now().millisecondsSinceEpoch}';
+    await room.sendEvent(
+      {
+        'call_id': callId,
+        'tool': 'search_knowledge_base',
+        'args_summary': 'query: "Q3 revenue by region"',
+      },
+      type: GaussAgentEvents.toolCall,
+    );
+    await room.sendEvent(
+      {
+        'call_id': callId,
+        'tool': 'search_knowledge_base',
+        'ok': true,
+        'summary': 'Found 3 documents; top match: “Q3 Financial Review”.',
+      },
+      type: GaussAgentEvents.toolResult,
+    );
   }
 
   void onAddPopupMenuButtonSelected(AddPopupMenuActions choice) {
