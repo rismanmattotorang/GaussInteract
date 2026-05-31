@@ -29,7 +29,7 @@ pub struct CapabilityGrant {
     pub allowed_tools: Vec<String>,
     /// Rooms the agent may access.
     pub accessible_rooms: Vec<String>,
-    /// Maximum tool calls per minute (0 = none permitted).
+    /// Maximum tool calls per minute (0 = unlimited).
     pub rate_limit_per_min: u32,
     /// Default classification for tools without an explicit override.
     pub default_class: ActionClass,

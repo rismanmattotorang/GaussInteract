@@ -47,14 +47,20 @@
 #![deny(rust_2018_idioms)]
 
 pub mod capability;
+pub mod clock;
 pub mod events;
 pub mod mcp;
 
 use crate::capability::{ActionClass, CapabilityGrant};
+use crate::clock::{Clock, SystemClock};
 use crate::events::ReflectedEvent;
 use crate::mcp::{ToolCall, ToolExecutor};
 use gm_store::{audit, MemoryStore, Store};
 use std::fmt;
+
+/// The rate-limit window: tool calls per agent are counted over this many
+/// seconds against the grant's `rate_limit_per_min` (spec §IV.C).
+const RATE_WINDOW_SECS: u64 = 60;
 
 /// The build/version string.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -121,37 +127,50 @@ pub enum Outcome {
 /// The agentic gateway. Holds the pending-approval queue and persists the
 /// authoritative, tamper-evident audit log through a pluggable
 /// [`gm_store::Store`]; it is the single object the homeserver routes agent
-/// traffic through. Generic over the backend, defaulting to the in-memory store.
+/// traffic through. Generic over the storage backend (defaulting to the
+/// in-memory store) and the [`Clock`] used for rate limiting.
 #[derive(Debug)]
-pub struct AgentGateway<S: Store = MemoryStore> {
+pub struct AgentGateway<S: Store = MemoryStore, C: Clock = SystemClock> {
     next_request_id: u64,
     next_call_seq: u64,
     pending: Vec<PendingApproval>,
     store: S,
+    clock: C,
+    /// `(agent, unix_secs)` of admitted calls, for sliding-window rate limiting.
+    recent_calls: Vec<(String, u64)>,
 }
 
-impl AgentGateway<MemoryStore> {
-    /// Create an empty gateway backed by an in-memory store.
+impl AgentGateway<MemoryStore, SystemClock> {
+    /// Create an empty gateway backed by an in-memory store and system clock.
     pub fn new() -> Self {
         Self::with_store(MemoryStore::default())
     }
 }
 
-impl Default for AgentGateway<MemoryStore> {
+impl Default for AgentGateway<MemoryStore, SystemClock> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S: Store> AgentGateway<S> {
+impl<S: Store> AgentGateway<S, SystemClock> {
     /// Create an empty gateway over a specific storage backend, so the audit
     /// trail is persisted where the rest of the homeserver's data lives.
     pub fn with_store(store: S) -> Self {
+        Self::with_store_and_clock(store, SystemClock)
+    }
+}
+
+impl<S: Store, C: Clock> AgentGateway<S, C> {
+    /// Create an empty gateway over a specific storage backend and clock.
+    pub fn with_store_and_clock(store: S, clock: C) -> Self {
         Self {
             next_request_id: 0,
             next_call_seq: 0,
             pending: Vec::new(),
             store,
+            clock,
+            recent_calls: Vec::new(),
         }
     }
 
@@ -177,25 +196,65 @@ impl<S: Store> AgentGateway<S> {
         id
     }
 
+    /// Whether `agent` has exhausted its rate budget. A limit of `0` means
+    /// unlimited. Prunes calls outside the window as a side effect.
+    fn is_rate_limited(&mut self, agent: &str, limit_per_min: u32) -> bool {
+        if limit_per_min == 0 {
+            return false;
+        }
+        let now = self.clock.now_unix_secs();
+        let cutoff = now.saturating_sub(RATE_WINDOW_SECS);
+        self.recent_calls.retain(|(_, ts)| *ts > cutoff);
+        let count = self.recent_calls.iter().filter(|(a, _)| a == agent).count();
+        count >= limit_per_min as usize
+    }
+
+    /// Record that `agent` consumed one unit of its rate budget now.
+    fn note_call(&mut self, agent: &str) {
+        let now = self.clock.now_unix_secs();
+        self.recent_calls.push((agent.to_owned(), now));
+    }
+
     /// Mediate an inbound tool call against the agent's capability grant.
+    ///
+    /// Order of checks: capability scope first (a forbidden tool never consumes
+    /// rate budget), then the per-agent rate limit, then auto-execute or queue
+    /// for human approval.
     pub fn handle<E: ToolExecutor>(
         &mut self,
         grant: &CapabilityGrant,
         call: ToolCall,
         executor: &mut E,
     ) -> Outcome {
-        match grant.classify(&call.tool, &call.room) {
-            ActionClass::Forbidden => {
-                audit::append(
-                    &mut self.store,
-                    &call.agent,
-                    &format!("denied_by_scope: {} in {}", call.tool, call.room),
-                );
-                Outcome::Denied {
-                    reason: format!("{} is not permitted in {}", call.tool, call.room),
-                    events: Vec::new(),
-                }
-            }
+        let class = grant.classify(&call.tool, &call.room);
+        if class == ActionClass::Forbidden {
+            audit::append(
+                &mut self.store,
+                &call.agent,
+                &format!("denied_by_scope: {} in {}", call.tool, call.room),
+            );
+            return Outcome::Denied {
+                reason: format!("{} is not permitted in {}", call.tool, call.room),
+                events: Vec::new(),
+            };
+        }
+        if self.is_rate_limited(&call.agent, grant.rate_limit_per_min) {
+            audit::append(
+                &mut self.store,
+                &call.agent,
+                &format!("rate_limited: {}", call.tool),
+            );
+            return Outcome::Denied {
+                reason: format!(
+                    "rate limit of {}/min exceeded for {}",
+                    grant.rate_limit_per_min, call.agent
+                ),
+                events: Vec::new(),
+            };
+        }
+        self.note_call(&call.agent);
+        match class {
+            ActionClass::Forbidden => unreachable!("handled above"),
             ActionClass::Auto => {
                 let call_id = self.next_call_id();
                 audit::append(
@@ -296,8 +355,10 @@ impl<S: Store> AgentGateway<S> {
 mod tests {
     use super::*;
     use crate::capability::{ActionClass, CapabilityGrant};
+    use crate::clock::ManualClock;
     use crate::events::TYPE_TOOL_CALL;
     use crate::mcp::EchoExecutor;
+    use gm_store::MemoryStore;
 
     fn grant() -> CapabilityGrant {
         CapabilityGrant::deny_all("@assistant:gaussian.tech")
@@ -314,6 +375,10 @@ mod tests {
             tool,
             "args",
         )
+    }
+
+    fn gateway_at(secs: u64) -> AgentGateway<MemoryStore, ManualClock> {
+        AgentGateway::with_store_and_clock(MemoryStore::default(), ManualClock::new(secs))
     }
 
     #[test]
@@ -393,5 +458,79 @@ mod tests {
             gw.resolve(42, true, "@boss:gaussian.tech", &mut exec),
             Err(GatewayError::UnknownRequest(42)),
         );
+    }
+
+    #[test]
+    fn rate_limit_blocks_excess_calls_then_recovers_after_window() {
+        let grant = CapabilityGrant::deny_all("@a:gaussian.tech")
+            .allow_room("!r:gaussian.tech")
+            .allow_tool("search", ActionClass::Auto)
+            .with_rate_limit(2);
+        let mut gw = gateway_at(1_000);
+        let mut exec = EchoExecutor;
+        let c = || ToolCall::new("@a:gaussian.tech", "!r:gaussian.tech", "search", "q");
+
+        // Two calls fit the budget.
+        assert!(matches!(
+            gw.handle(&grant, c(), &mut exec),
+            Outcome::Executed { .. }
+        ));
+        assert!(matches!(
+            gw.handle(&grant, c(), &mut exec),
+            Outcome::Executed { .. }
+        ));
+        // The third in the same minute is refused (and audited).
+        match gw.handle(&grant, c(), &mut exec) {
+            Outcome::Denied { reason, events } => {
+                assert!(reason.contains("rate limit"));
+                assert!(events.is_empty());
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        // After the window slides past, the budget refreshes.
+        gw.clock.advance(61);
+        assert!(matches!(
+            gw.handle(&grant, c(), &mut exec),
+            Outcome::Executed { .. }
+        ));
+        assert_eq!(gw.verify_audit(), Ok(()));
+    }
+
+    #[test]
+    fn zero_rate_limit_means_unlimited() {
+        let grant = CapabilityGrant::deny_all("@a:gaussian.tech")
+            .allow_room("!r:gaussian.tech")
+            .allow_tool("search", ActionClass::Auto); // rate_limit defaults to 0
+        let mut gw = gateway_at(1_000);
+        let mut exec = EchoExecutor;
+        for _ in 0..5 {
+            let c = ToolCall::new("@a:gaussian.tech", "!r:gaussian.tech", "search", "q");
+            assert!(matches!(
+                gw.handle(&grant, c, &mut exec),
+                Outcome::Executed { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn forbidden_tool_does_not_consume_rate_budget() {
+        let grant = CapabilityGrant::deny_all("@a:gaussian.tech")
+            .allow_room("!r:gaussian.tech")
+            .allow_tool("search", ActionClass::Auto)
+            .with_rate_limit(1);
+        let mut gw = gateway_at(1_000);
+        let mut exec = EchoExecutor;
+        // A forbidden tool is refused by scope and must not spend the budget.
+        let forbidden = ToolCall::new("@a:gaussian.tech", "!r:gaussian.tech", "rm_rf", "q");
+        assert!(matches!(
+            gw.handle(&grant, forbidden, &mut exec),
+            Outcome::Denied { .. }
+        ));
+        // The single allowed call still goes through.
+        let allowed = ToolCall::new("@a:gaussian.tech", "!r:gaussian.tech", "search", "q");
+        assert!(matches!(
+            gw.handle(&grant, allowed, &mut exec),
+            Outcome::Executed { .. }
+        ));
     }
 }
