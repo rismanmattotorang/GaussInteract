@@ -48,6 +48,7 @@
 
 pub mod appservice;
 pub mod capability;
+pub mod catalog;
 pub mod clock;
 pub mod events;
 pub mod mcp;
@@ -55,6 +56,7 @@ pub mod resources;
 
 use crate::appservice::AppserviceRegistration;
 use crate::capability::{ActionClass, CapabilityGrant};
+use crate::catalog::{DiscoverableTool, ToolCatalog};
 use crate::clock::{Clock, SystemClock};
 use crate::events::ReflectedEvent;
 use crate::mcp::{ToolCall, ToolExecutor};
@@ -155,6 +157,8 @@ pub struct AgentGateway<S: Store = MemoryStore, C: Clock = SystemClock> {
     clock: C,
     /// `(agent, unix_secs)` of admitted calls, for sliding-window rate limiting.
     recent_calls: Vec<(String, u64)>,
+    /// Per-agent daily usage: `agent -> (unix_day, calls_today)`.
+    daily_usage: std::collections::HashMap<String, (u64, u32)>,
     metrics: Metrics,
 }
 
@@ -189,6 +193,7 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
             store,
             clock,
             recent_calls: Vec::new(),
+            daily_usage: std::collections::HashMap::new(),
             metrics: Metrics::new(),
         }
     }
@@ -350,6 +355,53 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
         self.recent_calls.push((agent.to_owned(), now));
     }
 
+    fn current_day(&self) -> u64 {
+        self.clock.now_unix_secs() / 86_400
+    }
+
+    /// Whether `agent` has exhausted its *daily* budget. A limit of `0` means
+    /// unlimited. Rolls the counter over at the day boundary.
+    fn is_over_daily_budget(&mut self, agent: &str, daily_limit: u32) -> bool {
+        if daily_limit == 0 {
+            return false;
+        }
+        let day = self.current_day();
+        let entry = self.daily_usage.entry(agent.to_owned()).or_insert((day, 0));
+        if entry.0 != day {
+            *entry = (day, 0);
+        }
+        entry.1 >= daily_limit
+    }
+
+    /// Record that `agent` consumed one unit of its daily budget today.
+    fn note_daily_call(&mut self, agent: &str) {
+        let day = self.current_day();
+        let entry = self.daily_usage.entry(agent.to_owned()).or_insert((day, 0));
+        if entry.0 != day {
+            *entry = (day, 0);
+        }
+        entry.1 += 1;
+    }
+
+    /// The tools an agent may *discover* over MCP: those in `catalog` its grant
+    /// permits, each tagged with the grant's classification (spec §IV.B). This
+    /// is the inbound mirror of the gateway's least-privilege mediation — an
+    /// agent enumerates exactly what it may do, nothing more.
+    pub fn list_tools(
+        &mut self,
+        grant: &CapabilityGrant,
+        catalog: &ToolCatalog,
+    ) -> Vec<DiscoverableTool> {
+        let tools = catalog.list_for(grant);
+        audit::append(
+            &mut self.store,
+            grant.agent.as_str(),
+            &format!("tools_listed: {}", tools.len()),
+        );
+        self.metrics.inc_counter("gm_agent_tool_lists_total", &[]);
+        tools
+    }
+
     /// Mediate an inbound tool call against the agent's capability grant.
     ///
     /// Order of checks: capability scope first (a forbidden tool never consumes
@@ -391,7 +443,23 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 events: Vec::new(),
             };
         }
+        if self.is_over_daily_budget(call.agent.as_str(), grant.daily_call_limit) {
+            audit::append(
+                &mut self.store,
+                call.agent.as_str(),
+                &format!("daily_budget_exceeded: {}", call.tool),
+            );
+            self.record_outcome("budget_exceeded");
+            return Outcome::Denied {
+                reason: format!(
+                    "daily budget of {} calls exceeded for {}",
+                    grant.daily_call_limit, call.agent
+                ),
+                events: Vec::new(),
+            };
+        }
         self.note_call(call.agent.as_str());
+        self.note_daily_call(call.agent.as_str());
         match class {
             ActionClass::Forbidden => unreachable!("handled above"),
             ActionClass::Auto => {
@@ -802,5 +870,57 @@ mod tests {
         let text = gw.metrics().render_prometheus();
         assert!(text.contains("# TYPE gm_agent_actions_total counter"));
         assert!(text.contains("gm_agent_pending_approvals 1"));
+    }
+
+    #[test]
+    fn daily_budget_blocks_excess_calls_then_resets_next_day() {
+        use gm_util::{AgentId, RoomId};
+        let grant = CapabilityGrant::deny_all(AgentId::parse(AGENT).unwrap())
+            .allow_room(RoomId::parse(ROOM).unwrap())
+            .allow_tool("search", ActionClass::Auto)
+            .with_daily_limit(2);
+        let mut gw = gateway_at(1_000);
+        let mut exec = EchoExecutor;
+
+        assert!(matches!(
+            gw.handle(&grant, call("search"), &mut exec),
+            Outcome::Executed { .. }
+        ));
+        assert!(matches!(
+            gw.handle(&grant, call("search"), &mut exec),
+            Outcome::Executed { .. }
+        ));
+        // Third call today exceeds the daily budget.
+        match gw.handle(&grant, call("search"), &mut exec) {
+            Outcome::Denied { reason, .. } => assert!(reason.contains("daily budget")),
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        assert_eq!(
+            gw.metrics()
+                .counter("gm_agent_actions_total", &[("outcome", "budget_exceeded")]),
+            1
+        );
+        // A day later the budget resets.
+        gw.clock.advance(86_400);
+        assert!(matches!(
+            gw.handle(&grant, call("search"), &mut exec),
+            Outcome::Executed { .. }
+        ));
+        assert_eq!(gw.verify_audit(), Ok(()));
+    }
+
+    #[test]
+    fn list_tools_returns_only_granted_tools_with_grant_classification() {
+        use crate::catalog::{ToolCatalog, ToolSpec};
+        let catalog = ToolCatalog::new()
+            .with_tool(ToolSpec::new("search", "Search", ActionClass::Auto))
+            .with_tool(ToolSpec::new("send_email", "Email", ActionClass::Review))
+            .with_tool(ToolSpec::new("rm_rf", "Danger", ActionClass::Forbidden));
+        let mut gw = AgentGateway::new();
+        let discoverable = gw.list_tools(&grant(), &catalog);
+        let names: Vec<_> = discoverable.iter().map(|t| t.name.as_str()).collect();
+        // grant() permits search (auto) + send_email (review); rm_rf is not granted.
+        assert_eq!(names, ["search", "send_email"]);
+        assert_eq!(gw.audit_records().len(), 1);
     }
 }
