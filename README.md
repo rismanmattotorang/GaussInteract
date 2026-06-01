@@ -112,7 +112,7 @@ Derived from `GaussInteract-SPECS.pdf` (§V, §VII). The platform rewrite procee
 
 Cross-cutting, every phase: `forbid(unsafe_code)` outside audited crypto-adjacent crates, reproducible builds, and `cargo audit` / `cargo deny` gates in CI.
 
-See [`GaussInteract-SPECS.pdf`](./GaussInteract-SPECS.pdf) for the full specification and [`GaussMatrix.pdf`](./GaussMatrix.pdf) for the companion baseline survey. The complete, spec-grounded phased plan — covering both the client and the GaussMatrix server end to end — lives in [`ROADMAP.md`](./ROADMAP.md).
+See [`GaussInteract-SPECS.pdf`](./GaussInteract-SPECS.pdf) for the full specification and [`GaussMatrix.pdf`](./GaussMatrix.pdf) for the companion baseline survey. The complete, spec-grounded phased plan — covering both the client and the GaussMatrix server end to end — lives in [`ROADMAP.md`](./ROADMAP.md). The competitive gap analysis and the agentic-superiority strategy (how GaussInteract wins where centralised competitors structurally cannot) are in [`COMPETITIVE.md`](./COMPETITIVE.md).
 
 ---
 

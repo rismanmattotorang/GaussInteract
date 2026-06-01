@@ -79,6 +79,9 @@ pub struct CapabilityGrant {
     pub accessible_rooms: Vec<RoomId>,
     /// Maximum tool calls per minute (0 = unlimited).
     pub rate_limit_per_min: u32,
+    /// Maximum tool calls per day (0 = unlimited) — a longer-horizon usage
+    /// budget complementing the per-minute rate limit (agentic governance).
+    pub daily_call_limit: u32,
     /// Default classification for tools without an explicit override.
     pub default_class: ActionClass,
     /// Per-tool classification overrides (high-impact tools default to review).
@@ -93,6 +96,7 @@ impl CapabilityGrant {
             allowed_tools: Vec::new(),
             accessible_rooms: Vec::new(),
             rate_limit_per_min: 0,
+            daily_call_limit: 0,
             default_class: ActionClass::Forbidden,
             overrides: Vec::new(),
         }
@@ -114,15 +118,37 @@ impl CapabilityGrant {
         self
     }
 
-    /// Set the rate limit (builder-style).
+    /// Set the per-minute rate limit (builder-style).
     pub fn with_rate_limit(mut self, per_min: u32) -> Self {
         self.rate_limit_per_min = per_min;
+        self
+    }
+
+    /// Set the per-day call budget (builder-style).
+    pub fn with_daily_limit(mut self, per_day: u32) -> Self {
+        self.daily_call_limit = per_day;
         self
     }
 
     /// Whether the agent may use `tool` at all.
     pub fn permits_tool(&self, tool: &str) -> bool {
         self.allowed_tools.iter().any(|t| t == tool)
+    }
+
+    /// The classification of `tool` independent of any room (its override, or
+    /// the default), or `None` if the agent may not use it at all. Used for
+    /// capability-scoped tool discovery.
+    pub fn tool_class(&self, tool: &str) -> Option<ActionClass> {
+        if !self.permits_tool(tool) {
+            return None;
+        }
+        Some(
+            self.overrides
+                .iter()
+                .find(|(t, _)| t == tool)
+                .map(|(_, c)| *c)
+                .unwrap_or(self.default_class),
+        )
     }
 
     /// Whether the agent may access `room`.
@@ -151,6 +177,10 @@ impl CapabilityGrant {
         content.insert(
             "rate_limit_per_min".into(),
             Value::U64(u64::from(self.rate_limit_per_min)),
+        );
+        content.insert(
+            "daily_call_limit".into(),
+            Value::U64(u64::from(self.daily_call_limit)),
         );
         content.insert(
             "default_class".into(),
@@ -214,6 +244,16 @@ impl CapabilityGrant {
         let rate_limit_per_min =
             u32::try_from(rate).map_err(|_| CapabilityError::InvalidField("rate_limit_per_min"))?;
 
+        // Optional for backward compatibility: content from older servers / the
+        // client mirror may omit it, in which case there is no daily budget.
+        let daily_call_limit = match content.get("daily_call_limit") {
+            Some(value) => value
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or(CapabilityError::InvalidField("daily_call_limit"))?,
+            None => 0,
+        };
+
         let default_class = field(content, "default_class")?
             .as_str()
             .and_then(ActionClass::parse)
@@ -251,6 +291,7 @@ impl CapabilityGrant {
             allowed_tools,
             accessible_rooms,
             rate_limit_per_min,
+            daily_call_limit,
             default_class,
             overrides,
         })
@@ -313,6 +354,7 @@ mod tests {
             .allow_tool("search", ActionClass::Auto)
             .allow_tool("send_email", ActionClass::Review)
             .with_rate_limit(30)
+            .with_daily_limit(500)
     }
 
     #[test]
@@ -320,7 +362,25 @@ mod tests {
         let grant = sample_grant();
         let restored = CapabilityGrant::from_content(&grant.to_content()).unwrap();
         assert_eq!(restored, grant);
+        assert_eq!(restored.daily_call_limit, 500);
         assert_eq!(grant.to_event().event_type, "m.gauss.agent.capability");
+    }
+
+    #[test]
+    fn daily_limit_defaults_to_zero_when_absent_from_content() {
+        // Older content (or the client mirror) omits daily_call_limit.
+        let mut content = sample_grant().to_content();
+        content.remove("daily_call_limit");
+        let restored = CapabilityGrant::from_content(&content).unwrap();
+        assert_eq!(restored.daily_call_limit, 0); // unlimited
+    }
+
+    #[test]
+    fn tool_class_reflects_overrides_and_membership() {
+        let grant = sample_grant();
+        assert_eq!(grant.tool_class("search"), Some(ActionClass::Auto));
+        assert_eq!(grant.tool_class("send_email"), Some(ActionClass::Review));
+        assert_eq!(grant.tool_class("not_granted"), None);
     }
 
     #[test]
