@@ -25,9 +25,11 @@ pub mod events;
 pub mod json;
 pub mod pdu;
 pub mod room_version;
+pub mod server;
 
 pub use auth::{NoAuthority, TokenAuthority};
 pub use error::MatrixError;
 pub use json::Json;
 pub use pdu::Pdu;
 pub use room_version::RoomVersion;
+pub use server::{Homeserver, NoServer, RoomReader};
