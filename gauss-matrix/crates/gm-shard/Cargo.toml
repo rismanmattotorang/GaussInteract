@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "gm-shard"
+description = "GaussMatrix room placement: a consistent-hash ring assigning rooms to shards with minimal disruption on rebalance."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "gm_shard"
+
+[dependencies]
+gm-util = { path = "../gm-util" }
+# The coordination service (online rebalancing with working-set warming) and
+# the sharded federation sender build on this placement (spec §III.F).
+
+[dev-dependencies]

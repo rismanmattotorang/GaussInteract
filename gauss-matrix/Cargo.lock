@@ -132,10 +132,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "gm-e2ee"
+version = "0.0.1"
+dependencies = [
+ "gm-util",
+]
+
+[[package]]
+name = "gm-fed"
+version = "0.0.1"
+dependencies = [
+ "gm-api",
+ "gm-util",
+]
+
+[[package]]
+name = "gm-http"
+version = "0.0.1"
+dependencies = [
+ "gm-api",
+]
+
+[[package]]
 name = "gm-obs"
 version = "0.0.1"
 dependencies = [
  "gm-store",
+]
+
+[[package]]
+name = "gm-shard"
+version = "0.0.1"
+dependencies = [
+ "gm-util",
 ]
 
 [[package]]
@@ -151,6 +180,16 @@ name = "gm-store"
 version = "0.0.1"
 dependencies = [
  "rocksdb",
+]
+
+[[package]]
+name = "gm-svc"
+version = "0.0.1"
+dependencies = [
+ "gm-api",
+ "gm-stateres",
+ "gm-store",
+ "gm-util",
 ]
 
 [[package]]

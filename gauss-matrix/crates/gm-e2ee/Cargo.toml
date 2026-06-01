@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "gm-e2ee"
+description = "GaussMatrix E2EE key relay: device keys, one-time keys, cross-signing and key-backup envelopes — opaque key material the homeserver relays but never decrypts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "gm_e2ee"
+
+[dependencies]
+gm-util = { path = "../gm-util" }
+# The homeserver never holds plaintext (spec §VI.B): clients encrypt with
+# vodozemac and this crate relays the opaque key material (cross-signing, key
+# backup, key claiming). No cryptography is performed here.
+
+[dev-dependencies]

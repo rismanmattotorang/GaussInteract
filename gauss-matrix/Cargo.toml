@@ -13,9 +13,14 @@ resolver = "2"
 members = [
     "crates/gm-agent",
     "crates/gm-api",
+    "crates/gm-e2ee",
+    "crates/gm-fed",
+    "crates/gm-http",
     "crates/gm-obs",
+    "crates/gm-shard",
     "crates/gm-stateres",
     "crates/gm-store",
+    "crates/gm-svc",
     "crates/gm-util",
 ]
 # Remaining crates from the spec's decomposition (§III.B), added as implemented:
