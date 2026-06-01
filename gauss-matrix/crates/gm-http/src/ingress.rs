@@ -23,7 +23,8 @@
 use crate::auth::access_token;
 use crate::router::{RouteMatch, RouteResolution, Router};
 use crate::{Auth, Method, SUPPORTED_SPEC_VERSIONS};
-use gm_api::MatrixError;
+use gm_api::{MatrixError, NoAuthority, TokenAuthority};
+use gm_util::UserId;
 
 /// An inbound request, transport-independent.
 #[derive(Debug, Clone)]
@@ -92,17 +93,33 @@ impl Response {
     }
 }
 
-/// The homeserver ingress: resolves a request to a [`Response`].
+/// The homeserver ingress: resolves a request to a [`Response`], generic over
+/// the [`TokenAuthority`] that validates client access tokens. With the default
+/// [`NoAuthority`] every token is rejected; the assembled server plugs in the
+/// session store via [`Ingress::with_authority`].
 #[derive(Debug, Clone, Default)]
-pub struct Ingress {
+pub struct Ingress<A: TokenAuthority = NoAuthority> {
     router: Router,
+    authority: A,
 }
 
-impl Ingress {
-    /// An ingress over the full homeserver surface.
+impl Ingress<NoAuthority> {
+    /// An ingress over the full homeserver surface with no session layer wired
+    /// in (authenticated endpoints reject every token).
     pub fn new() -> Self {
         Self {
             router: Router::new(),
+            authority: NoAuthority,
+        }
+    }
+}
+
+impl<A: TokenAuthority> Ingress<A> {
+    /// An ingress backed by a token authority (the session layer).
+    pub fn with_authority(authority: A) -> Self {
+        Self {
+            router: Router::new(),
+            authority,
         }
     }
 
@@ -110,17 +127,11 @@ impl Ingress {
     pub fn handle(&self, req: &Request<'_>) -> Response {
         match self.router.resolve(req.method, req.target) {
             RouteResolution::Found(m) => {
-                // Gate access-token endpoints: a missing token is 401 before any
-                // handler runs. (Validating the token is the session layer's job.)
-                if m.endpoint.auth == Auth::AccessToken
-                    && access_token(req.authorization, req.target).is_none()
-                {
-                    return Response::error(
-                        401,
-                        &MatrixError::missing_token("missing access token"),
-                    );
-                }
-                self.serve(&m)
+                let user = match self.authenticate(&m, req) {
+                    Ok(user) => user,
+                    Err(resp) => return resp,
+                };
+                self.serve(&m, user.as_ref())
             }
             RouteResolution::MethodNotAllowed(allowed) => {
                 let mut resp = Response::error(
@@ -137,17 +148,52 @@ impl Ingress {
         }
     }
 
+    /// Authenticate a matched route. For an [`Auth::AccessToken`] endpoint a
+    /// missing token is `401 M_MISSING_TOKEN` and a token the authority does not
+    /// recognise is `401 M_UNKNOWN_TOKEN`; on success the authenticated user is
+    /// returned. Other auth schemes are not gated here yet (federation signature
+    /// verification is a later slice).
+    fn authenticate(&self, m: &RouteMatch, req: &Request<'_>) -> Result<Option<UserId>, Response> {
+        if m.endpoint.auth != Auth::AccessToken {
+            return Ok(None);
+        }
+        let Some(token) = access_token(req.authorization, req.target) else {
+            return Err(Response::error(
+                401,
+                &MatrixError::missing_token("missing access token"),
+            ));
+        };
+        match self.authority.user_for(&token) {
+            Some(user) => Ok(Some(user)),
+            None => Err(Response::error(
+                401,
+                &MatrixError::unknown_token("unrecognized access token"),
+            )),
+        }
+    }
+
     /// Convenience: handle an unauthenticated `method` + `target`.
     pub fn dispatch(&self, method: Method, target: &str) -> Response {
         self.handle(&Request::new(method, target))
     }
 
-    /// Produce the response for a matched route. Only endpoints wired to a
-    /// handler return a body; the rest return `501` so the contract is explicit.
-    fn serve(&self, m: &RouteMatch) -> Response {
+    /// Produce the response for a matched route. `user` is the authenticated
+    /// user for access-token endpoints. Only endpoints wired to a handler return
+    /// a body; the rest return `501` so the contract is explicit.
+    fn serve(&self, m: &RouteMatch, user: Option<&UserId>) -> Response {
         match (m.endpoint.method, m.endpoint.path) {
             (Method::Get, "/_matrix/client/versions") => Response::json_ok(versions_body()),
             (Method::Get, "/_matrix/client/v3/login") => Response::json_ok(login_flows_body()),
+            (Method::Get, "/_matrix/client/v3/account/whoami") => {
+                // The auth gate guarantees a user for this access-token endpoint.
+                match user {
+                    Some(user) => Response::json_ok(whoami_body(user)),
+                    None => Response::error(
+                        401,
+                        &MatrixError::unknown_token("unrecognized access token"),
+                    ),
+                }
+            }
             _ => Response::error(
                 501,
                 &MatrixError::unrecognized("endpoint not yet implemented"),
@@ -180,6 +226,12 @@ fn login_flows_body() -> String {
 
 /// The login flow types advertised at `GET /_matrix/client/v3/login`.
 const LOGIN_FLOWS: &[&str] = &["m.login.password", "m.login.sso"];
+
+/// The body of `GET /_matrix/client/v3/account/whoami`: `{"user_id":…}` for the
+/// user the access token authenticates.
+fn whoami_body(user: &UserId) -> String {
+    format!("{{\"user_id\":\"{}\"}}", json_escape(user.as_str()))
+}
 
 /// The `Allow` header value for a set of methods (e.g. `GET, POST`).
 fn allow_header(methods: &[Method]) -> String {
@@ -217,6 +269,28 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A test authority that recognises exactly one token.
+    struct OneToken {
+        token: &'static str,
+        user: &'static str,
+    }
+    impl TokenAuthority for OneToken {
+        fn user_for(&self, token: &str) -> Option<UserId> {
+            if token == self.token {
+                UserId::parse(self.user).ok()
+            } else {
+                None
+            }
+        }
+    }
+
+    fn authed() -> Ingress<OneToken> {
+        Ingress::with_authority(OneToken {
+            token: "tok123",
+            user: "@alice:gaussian.tech",
+        })
+    }
 
     #[test]
     fn serves_the_versions_endpoint() {
@@ -265,21 +339,54 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_endpoint_with_a_token_passes_the_gate() {
+    fn no_authority_rejects_a_present_token_as_unknown() {
+        // The default ingress has no session layer: a token is unrecognised.
         let ingress = Ingress::new();
-        // With a token, the auth gate passes; /sync is on the surface but not yet
-        // wired to a handler, so it reaches the 501 contract rather than 401.
         let req = Request::new(Method::Get, "/_matrix/client/v3/sync")
             .with_authorization("Bearer tok123");
         let resp = ingress.handle(&req);
-        assert_eq!(resp.status, 501);
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_UNKNOWN_TOKEN\""));
+    }
+
+    #[test]
+    fn a_recognised_token_passes_the_gate() {
+        // With an authority that knows the token, the gate passes; /sync is on
+        // the surface but not yet wired, so it reaches the 501 contract.
+        let req = Request::new(Method::Get, "/_matrix/client/v3/sync")
+            .with_authorization("Bearer tok123");
+        assert_eq!(authed().handle(&req).status, 501);
     }
 
     #[test]
     fn token_via_query_parameter_also_passes_the_gate() {
-        let ingress = Ingress::new();
-        let resp = ingress.dispatch(Method::Get, "/_matrix/client/v3/sync?access_token=tok123");
+        let resp = authed().dispatch(Method::Get, "/_matrix/client/v3/sync?access_token=tok123");
         assert_eq!(resp.status, 501); // gate passed, handler not yet wired
+    }
+
+    #[test]
+    fn whoami_returns_the_token_owner() {
+        let req = Request::new(Method::Get, "/_matrix/client/v3/account/whoami")
+            .with_authorization("Bearer tok123");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, "{\"user_id\":\"@alice:gaussian.tech\"}");
+    }
+
+    #[test]
+    fn whoami_with_an_unknown_token_is_401_unknown_token() {
+        let req = Request::new(Method::Get, "/_matrix/client/v3/account/whoami")
+            .with_authorization("Bearer wrong");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_UNKNOWN_TOKEN\""));
+    }
+
+    #[test]
+    fn whoami_without_a_token_is_401_missing_token() {
+        let resp = authed().dispatch(Method::Get, "/_matrix/client/v3/account/whoami");
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
     }
 
     #[test]

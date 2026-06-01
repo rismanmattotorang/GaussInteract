@@ -19,11 +19,13 @@
 #![warn(missing_docs)]
 #![deny(rust_2018_idioms)]
 
+pub mod auth;
 pub mod error;
 pub mod events;
 pub mod pdu;
 pub mod room_version;
 
+pub use auth::{NoAuthority, TokenAuthority};
 pub use error::MatrixError;
 pub use pdu::Pdu;
 pub use room_version::RoomVersion;
