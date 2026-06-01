@@ -16,13 +16,12 @@ name = "gm_store"
 
 [features]
 default = []
-# The RocksDB single-node-profile backend (RocksStore). The scaffold is
-# dependency-free (an ordered in-memory map standing in for rocksdb::DB,
-# fixing the on-disk key layout); the real `rocksdb` crate is added to this
-# feature's dependency set once registry access is available. The distributed-KV
-# (sharded) backend lands behind its own feature later.
-rocksdb = []
+# The RocksDB single-node-profile backend (RocksStore), spec §III.A/C. Brings in
+# the real `rocksdb` crate (compression libs off — this is a plain KV use). The
+# distributed-KV (sharded) backend lands behind its own feature later.
+rocksdb = ["dep:rocksdb"]
 
 [dependencies]
+rocksdb = { version = "0.22", optional = true, default-features = false }
 
 [dev-dependencies]

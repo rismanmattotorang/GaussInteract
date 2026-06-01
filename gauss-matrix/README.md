@@ -45,7 +45,7 @@ gauss-matrix/
     │   └── src/
     │       ├── lib.rs        # Store trait + per-domain column families (cf::*)
     │       ├── memory.rs     # in-memory backend
-    │       ├── rocks.rs      # RocksDB single-node-profile layout (`rocksdb` feature)
+    │       ├── rocks.rs      # real rocksdb::DB backend (`rocksdb` feature)
     │       └── audit.rs      # durable, tamper-evident audit log (§IV.D)
     ├── gm-util/          # shared primitives (§III.B)
     │   └── src/
@@ -123,11 +123,13 @@ metrics — the same loop the GaussInteract client renders.
 
 `gm-http` · `gm-api` · `gm-svc` · `gm-stateres` · `gm-fed` · `gm-e2ee` ·
 `gm-shard` — added as implemented (`gm-agent`, `gm-store`, `gm-util` and
-`gm-obs` are in place). The remaining live `gm-agent` wiring (Application
-Service registration for cross-signed agent identities, the MCP transport, and
+`gm-obs` are in place). `gm-store`'s **RocksDB** backend is real, behind the
+`rocksdb` feature (`cargo test -p gm-store --features rocksdb`; CI builds it via
+`--all-features`). The remaining live `gm-agent` wiring (Application Service
+registration for cross-signed agent identities, the MCP transport, and
 E2EE-aware mediation via `gm-e2ee`) lands behind the `mcp` feature; the
-RocksDB / distributed-KV `gm-store` backends, and `gm-obs`'s Prometheus HTTP
-exporter + OpenTelemetry traces, land behind their own features.
+distributed-KV `gm-store` backend (sharded profile) and `gm-obs`'s Prometheus
+HTTP exporter + OpenTelemetry traces land behind their own features.
 
 `gm-obs` (§VIII.A) turns the durable audit log into structured records and
 streams them to a pluggable SIEM sink (`stream_audit` → newline-delimited JSON),

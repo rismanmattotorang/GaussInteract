@@ -5,33 +5,38 @@
 //! `rocksdb` feature.
 //!
 //! The spec's single-node profile is a *tuned RocksDB* that preserves
-//! Conduit-family on-disk compatibility. This scaffold models the **on-disk key
-//! layout** that backend uses — each per-domain column family namespaced into a
-//! single ordered keyspace as `"{cf}\u{1f}{key}"` — so the encoding and
-//! ordered-scan semantics are fixed and testable now. It is dependency-free
-//! (an ordered in-memory map stands in for the `rocksdb::DB`); wiring the real
-//! `rocksdb` crate behind this same feature is then a localised change that
-//! keeps this exact key layout (or maps each `cf` onto a native RocksDB column
-//! family).
+//! Conduit-family on-disk compatibility. [`RocksStore`] backs the [`Store`]
+//! trait with a real `rocksdb::DB`. Per-domain column families are namespaced
+//! into the default keyspace as `"{cf}\u{1f}{key}"`, and [`Store::scan`] uses a
+//! RocksDB prefix iterator — the key layout fixed by the in-memory scaffold,
+//! now persistent. (Mapping each `cf` onto a native RocksDB column family is a
+//! later tuning step; the trait contract is identical either way.)
+//!
+//! The [`Store`] trait is infallible by design (mirroring the in-memory
+//! backend), so transient RocksDB errors are swallowed here; a fallible storage
+//! trait is a separate, larger change tracked in the roadmap.
 
 use crate::Store;
-use std::collections::BTreeMap;
+use rocksdb::{Direction, IteratorMode, Options, DB};
+use std::path::Path;
 
-/// Separator between the column-family prefix and the key in the flat keyspace.
+/// Separator between the column-family prefix and the key in the keyspace.
 const CF_SEP: char = '\u{1f}';
 
-/// RocksDB-profile [`Store`]: a single ordered keyspace with per-domain column
-/// families encoded as key prefixes. (In-memory stand-in for `rocksdb::DB`.)
-#[derive(Debug, Default)]
+/// RocksDB-profile [`Store`]: a persistent single-node backend.
+#[derive(Debug)]
 pub struct RocksStore {
-    kv: BTreeMap<String, Vec<u8>>,
+    db: DB,
 }
 
 impl RocksStore {
-    /// Open a store. The real backend takes a filesystem path and RocksDB
-    /// options; the scaffold is in-memory.
-    pub fn open() -> Self {
-        Self::default()
+    /// Open (creating if absent) a RocksDB database at `path`.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, rocksdb::Error> {
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        Ok(Self {
+            db: DB::open(&opts, path)?,
+        })
     }
 
     fn composite(cf: &str, key: &str) -> String {
@@ -45,30 +50,41 @@ impl RocksStore {
 
 impl Store for RocksStore {
     fn put(&mut self, cf: &str, key: &str, value: &[u8]) {
-        self.kv.insert(Self::composite(cf, key), value.to_vec());
+        // Best-effort: the Store contract is infallible. A fallible trait is
+        // tracked in the roadmap; a real deployment would surface this.
+        let _ = self.db.put(Self::composite(cf, key).as_bytes(), value);
     }
 
     fn get(&self, cf: &str, key: &str) -> Option<Vec<u8>> {
-        self.kv.get(&Self::composite(cf, key)).cloned()
+        self.db
+            .get(Self::composite(cf, key).as_bytes())
+            .ok()
+            .flatten()
     }
 
     fn scan(&self, cf: &str) -> Vec<(String, Vec<u8>)> {
         let prefix = Self::prefix(cf);
-        // Range from the prefix and stop once keys no longer share it — the
-        // ordered iteration a RocksDB prefix scan gives.
-        self.kv
-            .range(prefix.clone()..)
-            .take_while(|(k, _)| k.starts_with(&prefix))
-            .map(|(k, v)| (k[prefix.len()..].to_owned(), v.clone()))
-            .collect()
+        let mut out = Vec::new();
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(prefix.as_bytes(), Direction::Forward));
+        for item in iter {
+            let Ok((raw_key, value)) = item else { break };
+            let Ok(key) = std::str::from_utf8(&raw_key) else {
+                continue;
+            };
+            // The iterator is ordered; once the prefix no longer matches we are
+            // past this column family.
+            let Some(stripped) = key.strip_prefix(&prefix) else {
+                break;
+            };
+            out.push((stripped.to_owned(), value.to_vec()));
+        }
+        out
     }
 
     fn count(&self, cf: &str) -> usize {
-        let prefix = Self::prefix(cf);
-        self.kv
-            .range(prefix.clone()..)
-            .take_while(|(k, _)| k.starts_with(&prefix))
-            .count()
+        self.scan(cf).len()
     }
 }
 
@@ -76,25 +92,57 @@ impl Store for RocksStore {
 mod tests {
     use super::*;
     use crate::{audit, cf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempDb(std::path::PathBuf);
+    impl TempDb {
+        fn new() -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let mut path = std::env::temp_dir();
+            path.push(format!("gm-store-rocks-{}-{nanos}", std::process::id()));
+            Self(path)
+        }
+    }
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
-    fn flat_keyspace_isolates_column_families_and_orders_keys() {
-        let mut store = RocksStore::open();
+    fn persists_isolates_column_families_and_orders_keys() {
+        let tmp = TempDb::new();
+        let mut store = RocksStore::open(&tmp.0).unwrap();
         store.put(cf::EVENTS, "00001", b"e1");
         store.put(cf::ROOM_STATE, "00000", b"s0");
         store.put(cf::EVENTS, "00000", b"e0");
 
         assert_eq!(store.get(cf::EVENTS, "00000"), Some(b"e0".to_vec()));
-        // Scans are scoped to the column family and ordered by key.
         let events: Vec<_> = store.scan(cf::EVENTS).into_iter().map(|(k, _)| k).collect();
         assert_eq!(events, ["00000", "00001"]);
         assert_eq!(store.count(cf::ROOM_STATE), 1);
+        assert!(store.scan("missing").is_empty());
+    }
+
+    #[test]
+    fn data_survives_reopen() {
+        let tmp = TempDb::new();
+        {
+            let mut store = RocksStore::open(&tmp.0).unwrap();
+            store.put(cf::EVENTS, "k", b"v");
+        }
+        // Re-open the same path: the write is durable.
+        let store = RocksStore::open(&tmp.0).unwrap();
+        assert_eq!(store.get(cf::EVENTS, "k"), Some(b"v".to_vec()));
     }
 
     #[test]
     fn audit_log_works_over_the_rocksdb_profile() {
-        // The same durable audit log runs over any Store backend.
-        let mut store = RocksStore::open();
+        let tmp = TempDb::new();
+        let mut store = RocksStore::open(&tmp.0).unwrap();
         audit::append(&mut store, "@a:gaussian.tech", "auto_allowed: search");
         audit::append(&mut store, "@a:gaussian.tech", "executed: search ok=true");
         assert_eq!(audit::entries(&store).len(), 2);
