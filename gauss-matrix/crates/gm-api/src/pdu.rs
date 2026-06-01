@@ -9,7 +9,10 @@
 //! `auth_events` DAG links — far more than the event content, which is carried
 //! opaquely here (`content_json`) and typed by `ruma` in the production build.
 
+use crate::json::Json;
 use gm_util::{EventId, RoomId, UserId};
+use std::collections::BTreeMap;
+use std::fmt;
 
 /// A persistent room event as the server stores and authenticates it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +52,137 @@ impl Pdu {
             .as_deref()
             .map(|state_key| (self.kind.as_str(), state_key))
     }
+
+    /// Serialize this PDU to its Matrix JSON form (the shape federation sends and
+    /// the event-storage / `/state` paths return). `content_json` is embedded as
+    /// the parsed `content` object (an empty object if it does not parse).
+    pub fn to_json(&self) -> Json {
+        let mut obj = BTreeMap::new();
+        obj.insert(
+            "event_id".into(),
+            Json::String(self.event_id.as_str().into()),
+        );
+        obj.insert("room_id".into(), Json::String(self.room_id.as_str().into()));
+        obj.insert("sender".into(), Json::String(self.sender.as_str().into()));
+        obj.insert("type".into(), Json::String(self.kind.clone()));
+        if let Some(state_key) = &self.state_key {
+            obj.insert("state_key".into(), Json::String(state_key.clone()));
+        }
+        obj.insert(
+            "origin_server_ts".into(),
+            Json::Number(self.origin_server_ts as f64),
+        );
+        obj.insert("depth".into(), Json::Number(self.depth as f64));
+        obj.insert("prev_events".into(), event_id_array(&self.prev_events));
+        obj.insert("auth_events".into(), event_id_array(&self.auth_events));
+        obj.insert(
+            "content".into(),
+            Json::parse(&self.content_json).unwrap_or_else(|_| Json::Object(BTreeMap::new())),
+        );
+        Json::Object(obj)
+    }
+
+    /// Parse a PDU from its Matrix JSON form, re-validating every identifier
+    /// (federated input is untrusted). `content` is re-serialized compactly into
+    /// `content_json`; an absent `content` is treated as the empty object.
+    pub fn from_json(value: &Json) -> Result<Self, PduError> {
+        let event_id = parse_id(value, "event_id", EventId::parse)?;
+        let room_id = parse_id(value, "room_id", RoomId::parse)?;
+        let sender = parse_id(value, "sender", UserId::parse)?;
+        let kind = str_field(value, "type")?.to_owned();
+        let state_key = match value.get("state_key") {
+            None => None,
+            Some(Json::String(s)) => Some(s.clone()),
+            Some(_) => return Err(PduError::InvalidField("state_key")),
+        };
+        let origin_server_ts = u64_field(value, "origin_server_ts")?;
+        let depth = u64_field(value, "depth")?;
+        let prev_events = parse_id_array(value, "prev_events")?;
+        let auth_events = parse_id_array(value, "auth_events")?;
+        let content_json = match value.get("content") {
+            None => "{}".to_owned(),
+            Some(content) => content.to_string(),
+        };
+        Ok(Pdu {
+            event_id,
+            room_id,
+            sender,
+            kind,
+            state_key,
+            origin_server_ts,
+            depth,
+            prev_events,
+            auth_events,
+            content_json,
+        })
+    }
+}
+
+/// An error decoding a [`Pdu`] from JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PduError {
+    /// A required field was absent.
+    MissingField(&'static str),
+    /// A field was present but malformed (wrong type or an invalid id).
+    InvalidField(&'static str),
+}
+
+impl fmt::Display for PduError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PduError::MissingField(k) => write!(f, "missing PDU field: {k}"),
+            PduError::InvalidField(k) => write!(f, "invalid PDU field: {k}"),
+        }
+    }
+}
+
+impl std::error::Error for PduError {}
+
+fn event_id_array(ids: &[EventId]) -> Json {
+    Json::Array(
+        ids.iter()
+            .map(|e| Json::String(e.as_str().to_owned()))
+            .collect(),
+    )
+}
+
+fn str_field<'a>(value: &'a Json, key: &'static str) -> Result<&'a str, PduError> {
+    value
+        .get(key)
+        .ok_or(PduError::MissingField(key))?
+        .as_str()
+        .ok_or(PduError::InvalidField(key))
+}
+
+fn u64_field(value: &Json, key: &'static str) -> Result<u64, PduError> {
+    value
+        .get(key)
+        .ok_or(PduError::MissingField(key))?
+        .as_u64()
+        .ok_or(PduError::InvalidField(key))
+}
+
+fn parse_id<T, E>(
+    value: &Json,
+    key: &'static str,
+    parse: impl Fn(String) -> Result<T, E>,
+) -> Result<T, PduError> {
+    let s = str_field(value, key)?;
+    parse(s.to_owned()).map_err(|_| PduError::InvalidField(key))
+}
+
+fn parse_id_array(value: &Json, key: &'static str) -> Result<Vec<EventId>, PduError> {
+    let array = value
+        .get(key)
+        .ok_or(PduError::MissingField(key))?
+        .as_array()
+        .ok_or(PduError::InvalidField(key))?;
+    let mut out = Vec::with_capacity(array.len());
+    for item in array {
+        let id = item.as_str().ok_or(PduError::InvalidField(key))?;
+        out.push(EventId::parse(id).map_err(|_| PduError::InvalidField(key))?);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -80,5 +214,72 @@ mod tests {
         let message = pdu(events::ROOM_MESSAGE, None);
         assert!(!message.is_state());
         assert_eq!(message.state_tuple(), None);
+    }
+
+    #[test]
+    fn json_round_trips_a_state_event_with_dag_links() {
+        let mut p = pdu(events::ROOM_NAME, Some(""));
+        p.event_id = EventId::parse("$evt").unwrap();
+        p.origin_server_ts = 1_700_000_000_000; // a realistic ms timestamp
+        p.depth = 7;
+        p.prev_events = vec![
+            EventId::parse("$p1").unwrap(),
+            EventId::parse("$p2").unwrap(),
+        ];
+        p.auth_events = vec![EventId::parse("$a1").unwrap()];
+        p.content_json = "{\"name\":\"Ops\"}".to_owned();
+
+        let json = p.to_json();
+        // The JSON carries the Matrix field names.
+        assert_eq!(json.get("type").and_then(Json::as_str), Some("m.room.name"));
+        assert_eq!(
+            json.get("origin_server_ts").and_then(Json::as_u64),
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(
+            json.get("content")
+                .and_then(|c| c.get("name"))
+                .and_then(Json::as_str),
+            Some("Ops")
+        );
+
+        // Parsing it back yields an identical PDU (content re-serialized compact).
+        let restored = Pdu::from_json(&json).unwrap();
+        assert_eq!(restored, p);
+    }
+
+    #[test]
+    fn message_event_round_trips_without_a_state_key() {
+        let p = pdu(events::ROOM_MESSAGE, None);
+        let restored = Pdu::from_json(&p.to_json()).unwrap();
+        assert_eq!(restored, p);
+        assert!(restored.state_key.is_none());
+    }
+
+    #[test]
+    fn decoding_rejects_a_missing_field() {
+        let json = pdu(events::ROOM_MESSAGE, None).to_json();
+        let Json::Object(mut map) = json else {
+            unreachable!()
+        };
+        map.remove("sender");
+        assert_eq!(
+            Pdu::from_json(&Json::Object(map)),
+            Err(PduError::MissingField("sender"))
+        );
+    }
+
+    #[test]
+    fn decoding_rejects_a_malformed_identifier() {
+        let json = pdu(events::ROOM_MESSAGE, None).to_json();
+        let Json::Object(mut map) = json else {
+            unreachable!()
+        };
+        // A room id without its `!` sigil is rejected (untrusted federated input).
+        map.insert("room_id".into(), Json::String("not-a-room".into()));
+        assert_eq!(
+            Pdu::from_json(&Json::Object(map)),
+            Err(PduError::InvalidField("room_id"))
+        );
     }
 }
