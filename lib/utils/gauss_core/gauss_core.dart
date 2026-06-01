@@ -206,6 +206,8 @@ class GaussCapabilityGrant {
     required this.allowedTools,
     required this.accessibleRooms,
     required this.rateLimitPerMin,
+    required this.dailyCallLimit,
+    required this.dailyTokenBudget,
     required this.defaultClass,
     required this.overrides,
   });
@@ -222,6 +224,13 @@ class GaussCapabilityGrant {
   /// Maximum tool calls per minute (0 = unlimited).
   final int rateLimitPerMin;
 
+  /// Maximum tool calls per day (0 = unlimited).
+  final int dailyCallLimit;
+
+  /// Maximum tokens the agent may consume per day (0 = unlimited) — agentic
+  /// FinOps the supervisor can see and govern.
+  final int dailyTokenBudget;
+
   /// Classification for tools without an explicit override.
   final GaussActionClass defaultClass;
 
@@ -237,6 +246,14 @@ class GaussCapabilityGrant {
     if (agent is! String || rate is! int || defaultClassValue is! String) {
       return null;
     }
+    // Optional for backward compatibility, mirroring the server decode: older
+    // content (or a partial mirror) may omit these, meaning "unlimited".
+    final dailyCallValue = content['daily_call_limit'];
+    final dailyTokenValue = content['daily_token_budget'];
+    if (dailyCallValue is! int && dailyCallValue != null) return null;
+    if (dailyTokenValue is! int && dailyTokenValue != null) return null;
+    final dailyCallLimit = dailyCallValue is int ? dailyCallValue : 0;
+    final dailyTokenBudget = dailyTokenValue is int ? dailyTokenValue : 0;
     final defaultClass = gaussActionClassFromWire(defaultClassValue);
     final allowedTools = _stringList(content['allowed_tools']);
     final accessibleRooms = _stringList(content['accessible_rooms']);
@@ -262,6 +279,8 @@ class GaussCapabilityGrant {
       allowedTools: allowedTools,
       accessibleRooms: accessibleRooms,
       rateLimitPerMin: rate,
+      dailyCallLimit: dailyCallLimit,
+      dailyTokenBudget: dailyTokenBudget,
       defaultClass: defaultClass,
       overrides: overrides,
     );

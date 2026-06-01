@@ -66,6 +66,10 @@ pub struct ToolOutcome {
     pub ok: bool,
     /// A human-readable rendering of the result.
     pub summary: String,
+    /// Tokens the execution consumed (LLM/tool usage), metered against the
+    /// agent's daily token budget (spec §IV.C, agentic FinOps). An executor that
+    /// does not meter usage reports `0`.
+    pub tokens: u64,
 }
 
 /// Executes an approved tool call. In production this dispatches to the MCP
@@ -82,9 +86,14 @@ pub struct EchoExecutor;
 
 impl ToolExecutor for EchoExecutor {
     fn execute(&mut self, call: &ToolCall) -> ToolOutcome {
+        // A deterministic, stand-in token meter: one token per byte of the tool
+        // name and argument summary, so the budget machinery has a real figure
+        // to account against until the live MCP transport reports actual usage.
+        let tokens = (call.tool.len() + call.args_summary.len()) as u64;
         ToolOutcome {
             ok: true,
             summary: format!("executed {} ({})", call.tool, call.args_summary),
+            tokens,
         }
     }
 }

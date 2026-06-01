@@ -19,12 +19,16 @@
 //!    (greatest `origin_server_ts`, ties broken by the lexicographically
 //!    greatest event id).
 //!
+//! 3. [`CachedResolver`] — memoise the conflicted-slot resolution keyed by the
+//!    (immutable) set of conflicting event ids, the resolved-state cache of
+//!    §III.D, so recurrent conflicts are not recomputed.
+//!
 //! The conflict order here is the deterministic tie-break that the full
 //! state-resolution v2 algorithm layers its auth-chain-difference and
 //! reverse-topological *power/mainline* ordering on top of; that ordering, the
-//! iterative auth checks, and the parallelised engine + resolved-state cache
-//! (§III.D) are the remaining work. The partition and the total-order contract
-//! defined here are what they build on, and are correct and tested today.
+//! iterative auth checks, and the parallelised engine are the remaining work.
+//! The partition, the total-order contract, and the cache defined here are what
+//! they build on, and are correct and tested today.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -83,16 +87,96 @@ pub fn separate(states: &[StateMap]) -> (StateMap, Conflicts) {
 /// from it is ordered as timestamp `0` (it still participates by event id).
 pub fn resolve(states: &[StateMap], pdus: &HashMap<EventId, Pdu>) -> StateMap {
     let (mut resolved, conflicted) = separate(states);
+    resolved.extend(resolve_conflicts(&conflicted, pdus));
+    resolved
+}
+
+/// Resolve only the conflicted slots, picking each slot's winner under the
+/// deterministic order. The result depends solely on the conflicting events
+/// (which are immutable once created), which is what makes it cacheable.
+fn resolve_conflicts(conflicted: &Conflicts, pdus: &HashMap<EventId, Pdu>) -> StateMap {
+    let mut out = StateMap::new();
     for (key, candidates) in conflicted {
-        if let Some(winner) = candidates.into_iter().max_by(|a, b| {
-            let ta = pdus.get(a).map(|p| p.origin_server_ts).unwrap_or(0);
-            let tb = pdus.get(b).map(|p| p.origin_server_ts).unwrap_or(0);
-            ta.cmp(&tb).then_with(|| a.as_str().cmp(b.as_str()))
-        }) {
-            resolved.insert(key, winner);
+        if let Some(winner) = candidates
+            .iter()
+            .max_by(|a, b| {
+                let ta = pdus.get(a).map(|p| p.origin_server_ts).unwrap_or(0);
+                let tb = pdus.get(b).map(|p| p.origin_server_ts).unwrap_or(0);
+                ta.cmp(&tb).then_with(|| a.as_str().cmp(b.as_str()))
+            })
+            .cloned()
+        {
+            out.insert(key.clone(), winner);
         }
     }
-    resolved
+    out
+}
+
+/// The cache key for a resolution: the sorted, deduplicated set of conflicting
+/// event ids. The conflicted-slot resolution depends only on these (and their
+/// immutable metadata), so it is safe to memoise against this key (spec §III.D).
+fn conflict_key(conflicted: &Conflicts) -> Vec<String> {
+    let mut ids: Vec<String> = conflicted
+        .values()
+        .flatten()
+        .map(|e| e.as_str().to_owned())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// A resolved-state cache (spec §III.D): memoises the output of conflict
+/// resolution keyed by the set of conflicting state-event identifiers, so
+/// recurrent conflicts are not recomputed. Unconflicted slots are always merged
+/// from the live inputs, so the cache only ever holds the (input-independent)
+/// resolution of a given conflict set.
+#[derive(Debug, Default)]
+pub struct CachedResolver {
+    cache: HashMap<Vec<String>, StateMap>,
+    hits: u64,
+    misses: u64,
+}
+
+impl CachedResolver {
+    /// An empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resolve `states`, memoising the conflicted-slot resolution.
+    pub fn resolve(&mut self, states: &[StateMap], pdus: &HashMap<EventId, Pdu>) -> StateMap {
+        let (mut resolved, conflicted) = separate(states);
+        if !conflicted.is_empty() {
+            let key = conflict_key(&conflicted);
+            let resolved_conflicts = if let Some(cached) = self.cache.get(&key) {
+                self.hits += 1;
+                cached.clone()
+            } else {
+                self.misses += 1;
+                let rc = resolve_conflicts(&conflicted, pdus);
+                self.cache.insert(key, rc.clone());
+                rc
+            };
+            resolved.extend(resolved_conflicts);
+        }
+        resolved
+    }
+
+    /// Number of cache hits so far.
+    pub fn hits(&self) -> u64 {
+        self.hits
+    }
+
+    /// Number of cache misses so far.
+    pub fn misses(&self) -> u64 {
+        self.misses
+    }
+
+    /// Number of distinct conflict sets memoised.
+    pub fn cached_entries(&self) -> usize {
+        self.cache.len()
+    }
 }
 
 #[cfg(test)]
@@ -183,5 +267,39 @@ mod tests {
         let b: StateMap = [(create.clone(), ev("$create"))].into();
         let resolved = resolve(&[a, b], &HashMap::new());
         assert_eq!(resolved.get(&create), Some(&ev("$create")));
+    }
+
+    #[test]
+    fn cache_memoises_recurrent_conflicts_and_matches_uncached() {
+        let name = slot("m.room.name", "");
+        let a: StateMap = [(name.clone(), ev("$old"))].into();
+        let b: StateMap = [(name.clone(), ev("$new"))].into();
+        let mut pdus = HashMap::new();
+        pdus.insert(ev("$old"), pdu("$old", 100));
+        pdus.insert(ev("$new"), pdu("$new", 200));
+
+        let mut resolver = CachedResolver::new();
+        let first = resolver.resolve(&[a.clone(), b.clone()], &pdus);
+        let second = resolver.resolve(&[a.clone(), b.clone()], &pdus);
+
+        // Same result as the uncached path, and the second call is a cache hit.
+        assert_eq!(first, resolve(&[a, b], &pdus));
+        assert_eq!(first.get(&name), Some(&ev("$new")));
+        assert_eq!(first, second);
+        assert_eq!(resolver.misses(), 1);
+        assert_eq!(resolver.hits(), 1);
+        assert_eq!(resolver.cached_entries(), 1);
+    }
+
+    #[test]
+    fn cache_is_not_populated_when_there_is_no_conflict() {
+        let create = slot("m.room.create", "");
+        let a: StateMap = [(create.clone(), ev("$c"))].into();
+        let b: StateMap = [(create, ev("$c"))].into();
+        let mut resolver = CachedResolver::new();
+        resolver.resolve(&[a, b], &HashMap::new());
+        assert_eq!(resolver.cached_entries(), 0);
+        assert_eq!(resolver.hits(), 0);
+        assert_eq!(resolver.misses(), 0);
     }
 }

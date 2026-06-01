@@ -22,6 +22,17 @@
     "agentToolFailed": "Failed",
     "agentPermissions": "Agent permissions",
     "agentRateLimit": "Rate limit",
+    "agentDailyCalls": "Daily calls",
+    "agentTokenBudget": "Token budget",
+    "agentTokensPerDay": "{count}/day",
+    "@agentTokensPerDay": {
+        "type": "String",
+        "placeholders": {
+            "count": {
+                "type": "int"
+            }
+        }
+    },
     "agentUnlimited": "Unlimited",
     "agentDefault": "Default",
     "agentAllowedTools": "Allowed tools",
