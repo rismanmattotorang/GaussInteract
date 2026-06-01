@@ -127,6 +127,14 @@ static SURFACE: &[Endpoint] = &[
     Endpoint::cs(Method::Get, "/_matrix/client/v3/account/whoami"),
     Endpoint::cs(Method::Get, "/_matrix/client/v3/sync"),
     Endpoint::cs(
+        Method::Get,
+        "/_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}",
+    ),
+    Endpoint::cs(
+        Method::Get,
+        "/_matrix/client/v3/rooms/{roomId}/state/{eventType}",
+    ),
+    Endpoint::cs(
         Method::Put,
         "/_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}",
     ),

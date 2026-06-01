@@ -95,6 +95,31 @@ impl<S: Store> RoomService<S> {
             .and_then(|s| EventId::parse(s).ok())
     }
 
+    /// A persisted event by id within a room, if present.
+    pub fn pdu(&self, room: &RoomId, event_id: &EventId) -> Option<Pdu> {
+        self.timeline(room)
+            .into_iter()
+            .find(|p| &p.event_id == event_id)
+    }
+
+    /// The full event currently filling a state slot, if any.
+    pub fn state_event_pdu(&self, room: &RoomId, kind: &str, state_key: &str) -> Option<Pdu> {
+        let event_id = self.state_event(room, kind, state_key)?;
+        self.pdu(room, &event_id)
+    }
+
+    /// The content JSON of the state event filling a slot, if any — what the CS
+    /// `GET /rooms/{roomId}/state/{eventType}/{stateKey}` endpoint returns.
+    pub fn state_event_content(
+        &self,
+        room: &RoomId,
+        kind: &str,
+        state_key: &str,
+    ) -> Option<String> {
+        self.state_event_pdu(room, kind, state_key)
+            .map(|p| p.content_json)
+    }
+
     /// The room's full current state map.
     pub fn current_state(&self, room: &RoomId) -> StateMap {
         let prefix = Self::room_prefix(room);
@@ -121,6 +146,19 @@ impl<S: Store> RoomService<S> {
     /// deterministic resolver in `gm-stateres`.
     pub fn resolve_forks(&self, forks: &[StateMap], pdus: &HashMap<EventId, Pdu>) -> StateMap {
         gm_stateres::resolve(forks, pdus)
+    }
+}
+
+/// The room service is the ingress's [`gm_api::RoomReader`] — it answers CS
+/// state reads straight from the current-state map and timeline.
+impl<S: Store> gm_api::RoomReader for RoomService<S> {
+    fn room_state_content(
+        &self,
+        room: &RoomId,
+        event_type: &str,
+        state_key: &str,
+    ) -> Option<String> {
+        self.state_event_content(room, event_type, state_key)
     }
 }
 
@@ -178,6 +216,29 @@ mod tests {
         let state = svc.current_state(&room);
         assert_eq!(state.len(), 2);
         assert!(state.contains_key(&("m.room.create".to_owned(), String::new())));
+    }
+
+    #[test]
+    fn state_event_content_returns_the_current_slot_content() {
+        use gm_api::RoomReader;
+        let room = RoomId::parse("!r:gaussian.tech").unwrap();
+        let mut svc = RoomService::new(MemoryStore::default());
+        let mut name = pdu("$n1", 2, events::ROOM_NAME, Some(""));
+        name.content_json = "{\"name\":\"Ops\"}".to_owned();
+        svc.append(&pdu("$c", 1, events::ROOM_CREATE, Some("")));
+        svc.append(&name);
+
+        assert_eq!(
+            svc.state_event_content(&room, events::ROOM_NAME, ""),
+            Some("{\"name\":\"Ops\"}".to_owned())
+        );
+        // The RoomReader seam delegates to the same lookup.
+        assert_eq!(
+            RoomReader::room_state_content(&svc, &room, events::ROOM_NAME, ""),
+            Some("{\"name\":\"Ops\"}".to_owned())
+        );
+        // An empty slot is None.
+        assert_eq!(svc.state_event_content(&room, events::ROOM_TOPIC, ""), None);
     }
 
     #[test]

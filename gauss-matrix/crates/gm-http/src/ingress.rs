@@ -10,21 +10,27 @@
 //! std-only, means routing, authentication gating, status codes and the Matrix
 //! error envelope are all testable without a running server.
 //!
-//! What it serves today:
+//! What it serves today (all driven by the [`Homeserver`] service it is generic
+//! over — the default [`NoServer`] provides nothing, so only the public,
+//! state-free endpoints answer):
 //! - `GET /_matrix/client/versions` → the advertised [`SUPPORTED_SPEC_VERSIONS`];
-//! - `GET /_matrix/client/v3/login` → the supported login flows.
+//! - `GET /_matrix/client/v3/login` → the supported login flows;
+//! - `GET /_matrix/client/v3/account/whoami` → the token's user;
+//! - `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}` → the
+//!   content of a state event.
 //!
 //! Authentication is gated centrally: a request to an [`Auth::AccessToken`]
-//! endpoint without a token is `401 M_MISSING_TOKEN` before any handler runs.
-//! Unknown targets are `404 M_UNRECOGNIZED`; a known path with the wrong method
-//! is `405 M_UNRECOGNIZED` + an `Allow` header; endpoints on the
+//! endpoint without a token is `401 M_MISSING_TOKEN`, and a token the service
+//! does not recognise is `401 M_UNKNOWN_TOKEN`, before any handler runs. Unknown
+//! targets are `404 M_UNRECOGNIZED`; a known path with the wrong method is
+//! `405 M_UNRECOGNIZED` + an `Allow` header; endpoints on the
 //! [surface](crate::Endpoint::surface) without a handler yet are `501`.
 
 use crate::auth::access_token;
 use crate::router::{RouteMatch, RouteResolution, Router};
 use crate::{Auth, Method, SUPPORTED_SPEC_VERSIONS};
-use gm_api::{MatrixError, NoAuthority, TokenAuthority};
-use gm_util::UserId;
+use gm_api::{Homeserver, MatrixError, NoServer};
+use gm_util::{RoomId, UserId};
 
 /// An inbound request, transport-independent.
 #[derive(Debug, Clone)]
@@ -94,32 +100,32 @@ impl Response {
 }
 
 /// The homeserver ingress: resolves a request to a [`Response`], generic over
-/// the [`TokenAuthority`] that validates client access tokens. With the default
-/// [`NoAuthority`] every token is rejected; the assembled server plugs in the
-/// session store via [`Ingress::with_authority`].
+/// the [`Homeserver`] service that validates tokens and reads room state. With
+/// the default [`NoServer`] no token is accepted and no room is found; the
+/// assembled server plugs its composed services in via [`Ingress::with_server`].
 #[derive(Debug, Clone, Default)]
-pub struct Ingress<A: TokenAuthority = NoAuthority> {
+pub struct Ingress<H: Homeserver = NoServer> {
     router: Router,
-    authority: A,
+    server: H,
 }
 
-impl Ingress<NoAuthority> {
-    /// An ingress over the full homeserver surface with no session layer wired
-    /// in (authenticated endpoints reject every token).
+impl Ingress<NoServer> {
+    /// An ingress over the full homeserver surface with no service core wired in
+    /// (authenticated endpoints reject every token; room reads find nothing).
     pub fn new() -> Self {
         Self {
             router: Router::new(),
-            authority: NoAuthority,
+            server: NoServer,
         }
     }
 }
 
-impl<A: TokenAuthority> Ingress<A> {
-    /// An ingress backed by a token authority (the session layer).
-    pub fn with_authority(authority: A) -> Self {
+impl<H: Homeserver> Ingress<H> {
+    /// An ingress backed by a homeserver service (the composed service core).
+    pub fn with_server(server: H) -> Self {
         Self {
             router: Router::new(),
-            authority,
+            server,
         }
     }
 
@@ -149,7 +155,7 @@ impl<A: TokenAuthority> Ingress<A> {
     }
 
     /// Authenticate a matched route. For an [`Auth::AccessToken`] endpoint a
-    /// missing token is `401 M_MISSING_TOKEN` and a token the authority does not
+    /// missing token is `401 M_MISSING_TOKEN` and a token the service does not
     /// recognise is `401 M_UNKNOWN_TOKEN`; on success the authenticated user is
     /// returned. Other auth schemes are not gated here yet (federation signature
     /// verification is a later slice).
@@ -163,7 +169,7 @@ impl<A: TokenAuthority> Ingress<A> {
                 &MatrixError::missing_token("missing access token"),
             ));
         };
-        match self.authority.user_for(&token) {
+        match self.server.user_for(&token) {
             Some(user) => Ok(Some(user)),
             None => Err(Response::error(
                 401,
@@ -194,10 +200,36 @@ impl<A: TokenAuthority> Ingress<A> {
                     ),
                 }
             }
+            (Method::Get, "/_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}")
+            | (Method::Get, "/_matrix/client/v3/rooms/{roomId}/state/{eventType}") => {
+                self.serve_state_event(m)
+            }
             _ => Response::error(
                 501,
                 &MatrixError::unrecognized("endpoint not yet implemented"),
             ),
+        }
+    }
+
+    /// `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}[/{stateKey}]`:
+    /// return the content of the state event filling that slot, or `404
+    /// M_NOT_FOUND` if it is empty. The state key defaults to `""` when the path
+    /// omits it (Matrix's shorter form); a malformed room id is `400`.
+    fn serve_state_event(&self, m: &RouteMatch) -> Response {
+        let (Some(room_id), Some(event_type)) = (m.param("roomId"), m.param("eventType")) else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let state_key = m.param("stateKey").unwrap_or("");
+        let Ok(room) = RoomId::parse(room_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        match self.server.room_state_content(&room, event_type, state_key) {
+            // The stored content is already a JSON object; return it verbatim.
+            Some(content) => Response::json_ok(content),
+            None => Response::error(404, &MatrixError::not_found("state event not found")),
         }
     }
 }
@@ -269,26 +301,48 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gm_api::{RoomReader, TokenAuthority};
+    use std::collections::BTreeMap;
 
-    /// A test authority that recognises exactly one token.
-    struct OneToken {
-        token: &'static str,
-        user: &'static str,
+    /// A test homeserver: recognises one token and holds some room state.
+    #[derive(Default)]
+    struct TestServer {
+        token: String,
+        user: String,
+        /// (room, event_type, state_key) -> content JSON.
+        state: BTreeMap<(String, String, String), String>,
     }
-    impl TokenAuthority for OneToken {
+    impl TokenAuthority for TestServer {
         fn user_for(&self, token: &str) -> Option<UserId> {
             if token == self.token {
-                UserId::parse(self.user).ok()
+                UserId::parse(self.user.clone()).ok()
             } else {
                 None
             }
         }
     }
+    impl RoomReader for TestServer {
+        fn room_state_content(
+            &self,
+            room: &RoomId,
+            event_type: &str,
+            state_key: &str,
+        ) -> Option<String> {
+            self.state
+                .get(&(
+                    room.as_str().to_owned(),
+                    event_type.to_owned(),
+                    state_key.to_owned(),
+                ))
+                .cloned()
+        }
+    }
 
-    fn authed() -> Ingress<OneToken> {
-        Ingress::with_authority(OneToken {
-            token: "tok123",
-            user: "@alice:gaussian.tech",
+    fn authed() -> Ingress<TestServer> {
+        Ingress::with_server(TestServer {
+            token: "tok123".to_owned(),
+            user: "@alice:gaussian.tech".to_owned(),
+            state: BTreeMap::new(),
         })
     }
 
@@ -396,5 +450,69 @@ mod tests {
         // (handler not yet wired), not a 401.
         let resp = ingress.dispatch(Method::Post, "/_matrix/client/v3/login");
         assert_eq!(resp.status, 501);
+    }
+
+    fn server_with_room_name() -> Ingress<TestServer> {
+        let mut state = BTreeMap::new();
+        state.insert(
+            (
+                "!room:gaussian.tech".to_owned(),
+                "m.room.name".to_owned(),
+                String::new(),
+            ),
+            "{\"name\":\"Ops\"}".to_owned(),
+        );
+        Ingress::with_server(TestServer {
+            token: "tok123".to_owned(),
+            user: "@alice:gaussian.tech".to_owned(),
+            state,
+        })
+    }
+
+    #[test]
+    fn state_event_read_returns_the_content() {
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/state/m.room.name",
+        )
+        .with_authorization("Bearer tok123");
+        let resp = server_with_room_name().handle(&req);
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, "{\"name\":\"Ops\"}");
+    }
+
+    #[test]
+    fn state_event_read_with_a_url_encoded_room_id_resolves() {
+        // A client percent-encodes the room id; the router decodes it.
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/client/v3/rooms/%21room%3Agaussian.tech/state/m.room.name",
+        )
+        .with_authorization("Bearer tok123");
+        assert_eq!(server_with_room_name().handle(&req).status, 200);
+    }
+
+    #[test]
+    fn missing_state_event_is_404_not_found() {
+        // A valid room but an empty slot.
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/state/m.room.topic",
+        )
+        .with_authorization("Bearer tok123");
+        let resp = server_with_room_name().handle(&req);
+        assert_eq!(resp.status, 404);
+        assert!(resp.body.contains("\"errcode\":\"M_NOT_FOUND\""));
+    }
+
+    #[test]
+    fn state_event_read_requires_authentication() {
+        // No token -> 401 before any room lookup.
+        let resp = server_with_room_name().dispatch(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/state/m.room.name",
+        );
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
     }
 }
