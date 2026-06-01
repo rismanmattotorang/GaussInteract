@@ -29,8 +29,9 @@
 use crate::auth::access_token;
 use crate::router::{RouteMatch, RouteResolution, Router};
 use crate::{Auth, Method, SUPPORTED_SPEC_VERSIONS};
-use gm_api::{Homeserver, MatrixError, NoServer};
+use gm_api::{Homeserver, Json, LoginGrant, MatrixError, NoServer};
 use gm_util::{RoomId, UserId};
+use std::collections::BTreeMap;
 
 /// An inbound request, transport-independent.
 #[derive(Debug, Clone)]
@@ -41,21 +42,30 @@ pub struct Request<'a> {
     pub target: &'a str,
     /// The raw `Authorization` header value, if present.
     pub authorization: Option<&'a str>,
+    /// The request body (JSON), if any.
+    pub body: Option<&'a str>,
 }
 
 impl<'a> Request<'a> {
-    /// A request with no `Authorization` header.
+    /// A request with no `Authorization` header and no body.
     pub fn new(method: Method, target: &'a str) -> Self {
         Self {
             method,
             target,
             authorization: None,
+            body: None,
         }
     }
 
     /// Set the `Authorization` header value (builder-style).
     pub fn with_authorization(mut self, value: &'a str) -> Self {
         self.authorization = Some(value);
+        self
+    }
+
+    /// Set the request body (builder-style).
+    pub fn with_body(mut self, body: &'a str) -> Self {
+        self.body = Some(body);
         self
     }
 }
@@ -137,7 +147,7 @@ impl<H: Homeserver> Ingress<H> {
                     Ok(user) => user,
                     Err(resp) => return resp,
                 };
-                self.serve(&m, user.as_ref())
+                self.serve(&m, user.as_ref(), req)
             }
             RouteResolution::MethodNotAllowed(allowed) => {
                 let mut resp = Response::error(
@@ -186,10 +196,11 @@ impl<H: Homeserver> Ingress<H> {
     /// Produce the response for a matched route. `user` is the authenticated
     /// user for access-token endpoints. Only endpoints wired to a handler return
     /// a body; the rest return `501` so the contract is explicit.
-    fn serve(&self, m: &RouteMatch, user: Option<&UserId>) -> Response {
+    fn serve(&self, m: &RouteMatch, user: Option<&UserId>, req: &Request<'_>) -> Response {
         match (m.endpoint.method, m.endpoint.path) {
             (Method::Get, "/_matrix/client/versions") => Response::json_ok(versions_body()),
             (Method::Get, "/_matrix/client/v3/login") => Response::json_ok(login_flows_body()),
+            (Method::Post, "/_matrix/client/v3/login") => self.serve_login(req),
             (Method::Get, "/_matrix/client/v3/account/whoami") => {
                 // The auth gate guarantees a user for this access-token endpoint.
                 match user {
@@ -232,6 +243,45 @@ impl<H: Homeserver> Ingress<H> {
             None => Response::error(404, &MatrixError::not_found("state event not found")),
         }
     }
+
+    /// `POST /_matrix/client/v3/login`: authenticate `m.login.password` and, on
+    /// success, return the user id and a fresh access token. Bad JSON is `400
+    /// M_NOT_JSON`, a missing/Unsupported flow is `400`, and wrong credentials
+    /// are `403 M_FORBIDDEN`.
+    fn serve_login(&self, req: &Request<'_>) -> Response {
+        let Some(body) = req.body else {
+            return Response::error(400, &MatrixError::new("M_NOT_JSON", "missing request body"));
+        };
+        let Ok(parsed) = Json::parse(body) else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_NOT_JSON", "request body is not JSON"),
+            );
+        };
+        if parsed.get("type").and_then(Json::as_str) != Some("m.login.password") {
+            return Response::error(
+                400,
+                &MatrixError::new("M_UNKNOWN", "unsupported login type"),
+            );
+        }
+        // The user is in `identifier.user` (current) or top-level `user` (legacy).
+        let user = parsed
+            .get("identifier")
+            .and_then(|i| i.get("user"))
+            .or_else(|| parsed.get("user"))
+            .and_then(Json::as_str);
+        let password = parsed.get("password").and_then(Json::as_str);
+        let (Some(user), Some(password)) = (user, password) else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_BAD_JSON", "missing user or password"),
+            );
+        };
+        match self.server.password_login(user, password) {
+            Some(grant) => Response::json_ok(login_response(&grant)),
+            None => Response::error(403, &MatrixError::forbidden("invalid username or password")),
+        }
+    }
 }
 
 /// The body of `GET /_matrix/client/versions`: `{"versions":[…]}`, built from the
@@ -263,6 +313,21 @@ const LOGIN_FLOWS: &[&str] = &["m.login.password", "m.login.sso"];
 /// user the access token authenticates.
 fn whoami_body(user: &UserId) -> String {
     format!("{{\"user_id\":\"{}\"}}", json_escape(user.as_str()))
+}
+
+/// The `POST /_matrix/client/v3/login` success body: `{"user_id":…,
+/// "access_token":…}`.
+fn login_response(grant: &LoginGrant) -> String {
+    let mut obj = BTreeMap::new();
+    obj.insert(
+        "user_id".to_owned(),
+        Json::String(grant.user_id.as_str().to_owned()),
+    );
+    obj.insert(
+        "access_token".to_owned(),
+        Json::String(grant.access_token.clone()),
+    );
+    Json::Object(obj).to_string()
 }
 
 /// The `Allow` header value for a set of methods (e.g. `GET, POST`).
@@ -301,14 +366,15 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_api::{RoomReader, TokenAuthority};
+    use gm_api::{Login, RoomReader, TokenAuthority};
     use std::collections::BTreeMap;
 
-    /// A test homeserver: recognises one token and holds some room state.
+    /// A test homeserver: one account/token, and some room state.
     #[derive(Default)]
     struct TestServer {
         token: String,
         user: String,
+        password: String,
         /// (room, event_type, state_key) -> content JSON.
         state: BTreeMap<(String, String, String), String>,
     }
@@ -337,11 +403,25 @@ mod tests {
                 .cloned()
         }
     }
+    impl Login for TestServer {
+        fn password_login(&self, localpart: &str, password: &str) -> Option<LoginGrant> {
+            let expected = self.user.trim_start_matches('@').split(':').next()?;
+            if !self.password.is_empty() && localpart == expected && password == self.password {
+                Some(LoginGrant {
+                    user_id: UserId::parse(self.user.clone()).ok()?,
+                    access_token: self.token.clone(),
+                })
+            } else {
+                None
+            }
+        }
+    }
 
     fn authed() -> Ingress<TestServer> {
         Ingress::with_server(TestServer {
             token: "tok123".to_owned(),
             user: "@alice:gaussian.tech".to_owned(),
+            password: "pw".to_owned(),
             state: BTreeMap::new(),
         })
     }
@@ -445,11 +525,90 @@ mod tests {
 
     #[test]
     fn public_login_post_needs_no_token() {
-        let ingress = Ingress::new();
-        // POST /login is public; without a token it reaches the 501 contract
-        // (handler not yet wired), not a 401.
-        let resp = ingress.dispatch(Method::Post, "/_matrix/client/v3/login");
-        assert_eq!(resp.status, 501);
+        // POST /login is public: with NoServer it reaches the handler (which
+        // rejects the credentials, 403), rather than being gated with a 401.
+        let body = r#"{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"pw"}"#;
+        let req = Request::new(Method::Post, "/_matrix/client/v3/login").with_body(body);
+        let resp = Ingress::new().handle(&req);
+        assert_eq!(resp.status, 403);
+    }
+
+    fn login_body(user: &str, password: &str) -> String {
+        format!(
+            r#"{{"type":"m.login.password","identifier":{{"type":"m.id.user","user":"{user}"}},"password":"{password}"}}"#
+        )
+    }
+
+    #[test]
+    fn login_with_correct_password_returns_user_id_and_token() {
+        let body = login_body("alice", "pw");
+        let req = Request::new(Method::Post, "/_matrix/client/v3/login").with_body(&body);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        let parsed = Json::parse(&resp.body).unwrap();
+        assert_eq!(
+            parsed.get("user_id").and_then(Json::as_str),
+            Some("@alice:gaussian.tech")
+        );
+        assert_eq!(
+            parsed.get("access_token").and_then(Json::as_str),
+            Some("tok123")
+        );
+    }
+
+    #[test]
+    fn login_with_wrong_password_is_403() {
+        let body = login_body("alice", "nope");
+        let req = Request::new(Method::Post, "/_matrix/client/v3/login").with_body(&body);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 403);
+        assert!(resp.body.contains("\"errcode\":\"M_FORBIDDEN\""));
+    }
+
+    #[test]
+    fn login_with_legacy_top_level_user_field_works() {
+        let body = r#"{"type":"m.login.password","user":"alice","password":"pw"}"#;
+        let req = Request::new(Method::Post, "/_matrix/client/v3/login").with_body(body);
+        assert_eq!(authed().handle(&req).status, 200);
+    }
+
+    #[test]
+    fn login_with_unsupported_type_is_400() {
+        let body = r#"{"type":"m.login.token","token":"x"}"#;
+        let req = Request::new(Method::Post, "/_matrix/client/v3/login").with_body(body);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("M_UNKNOWN"));
+    }
+
+    #[test]
+    fn login_with_malformed_json_is_400_not_json() {
+        let req = Request::new(Method::Post, "/_matrix/client/v3/login").with_body("{not json");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("M_NOT_JSON"));
+    }
+
+    #[test]
+    fn login_obtained_token_then_authenticates_whoami() {
+        // End to end: log in, then use the returned token on an authed endpoint.
+        let ingress = authed();
+        let body = login_body("alice", "pw");
+        let login = ingress
+            .handle(&Request::new(Method::Post, "/_matrix/client/v3/login").with_body(&body));
+        let token = Json::parse(&login.body)
+            .unwrap()
+            .get("access_token")
+            .and_then(Json::as_str)
+            .unwrap()
+            .to_owned();
+        let auth = format!("Bearer {token}");
+        let whoami = ingress.handle(
+            &Request::new(Method::Get, "/_matrix/client/v3/account/whoami")
+                .with_authorization(&auth),
+        );
+        assert_eq!(whoami.status, 200);
+        assert!(whoami.body.contains("@alice:gaussian.tech"));
     }
 
     fn server_with_room_name() -> Ingress<TestServer> {
@@ -465,6 +624,7 @@ mod tests {
         Ingress::with_server(TestServer {
             token: "tok123".to_owned(),
             user: "@alice:gaussian.tech".to_owned(),
+            password: "pw".to_owned(),
             state,
         })
     }

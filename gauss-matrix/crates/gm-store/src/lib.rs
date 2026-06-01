@@ -42,6 +42,8 @@ pub mod cf {
     pub const AGENT_MEMORY: &str = "agent_memory";
     /// Client access tokens → the user/device they authenticate (§II.B).
     pub const ACCESS_TOKENS: &str = "access_tokens";
+    /// User accounts → their password verifier (§II.B).
+    pub const ACCOUNTS: &str = "accounts";
 }
 
 /// A backend-agnostic, column-family keyed store.

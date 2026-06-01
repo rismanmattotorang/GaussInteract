@@ -17,9 +17,11 @@
 #![warn(missing_docs)]
 #![deny(rust_2018_idioms)]
 
+pub mod accounts;
 mod codec;
 pub mod session;
 
+pub use accounts::AccountStore;
 pub use session::SessionStore;
 
 use gm_api::Pdu;
