@@ -16,6 +16,7 @@
 #![warn(missing_docs)]
 #![deny(rust_2018_idioms)]
 
+pub mod auth;
 pub mod ingress;
 pub mod router;
 
@@ -47,7 +48,20 @@ pub enum Api {
     Appservice,
 }
 
-/// A homeserver endpoint: which API, method, and path template it is served at.
+/// The authentication scheme an endpoint requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Auth {
+    /// No authentication (e.g. `/versions`, `/login`).
+    None,
+    /// A client access token (`Authorization: Bearer …`), the CS API scheme.
+    AccessToken,
+    /// A federation request signature (the SS API scheme).
+    Federation,
+    /// The application-service `hs_token` (the AS API scheme).
+    Appservice,
+}
+
+/// A homeserver endpoint: which API, method, path template, and auth scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Endpoint {
     /// The API this endpoint belongs to.
@@ -56,14 +70,27 @@ pub struct Endpoint {
     pub method: Method,
     /// The path template (parameters in `{braces}`).
     pub path: &'static str,
+    /// The authentication scheme the endpoint requires.
+    pub auth: Auth,
 }
 
 impl Endpoint {
+    /// A Client–Server endpoint requiring a client access token.
     const fn cs(method: Method, path: &'static str) -> Self {
         Self {
             api: Api::ClientServer,
             method,
             path,
+            auth: Auth::AccessToken,
+        }
+    }
+    /// A public (unauthenticated) Client–Server endpoint.
+    const fn cs_public(method: Method, path: &'static str) -> Self {
+        Self {
+            api: Api::ClientServer,
+            method,
+            path,
+            auth: Auth::None,
         }
     }
     const fn ss(method: Method, path: &'static str) -> Self {
@@ -71,6 +98,7 @@ impl Endpoint {
             api: Api::ServerServer,
             method,
             path,
+            auth: Auth::Federation,
         }
     }
     const fn as_(method: Method, path: &'static str) -> Self {
@@ -78,6 +106,7 @@ impl Endpoint {
             api: Api::Appservice,
             method,
             path,
+            auth: Auth::Appservice,
         }
     }
 
@@ -90,9 +119,11 @@ impl Endpoint {
 
 /// The endpoint conformance surface (see [`Endpoint::surface`]).
 static SURFACE: &[Endpoint] = &[
-    // Client–Server
-    Endpoint::cs(Method::Get, "/_matrix/client/versions"),
-    Endpoint::cs(Method::Post, "/_matrix/client/v3/login"),
+    // Client–Server (public)
+    Endpoint::cs_public(Method::Get, "/_matrix/client/versions"),
+    Endpoint::cs_public(Method::Get, "/_matrix/client/v3/login"),
+    Endpoint::cs_public(Method::Post, "/_matrix/client/v3/login"),
+    // Client–Server (access-token authenticated)
     Endpoint::cs(Method::Get, "/_matrix/client/v3/sync"),
     Endpoint::cs(
         Method::Put,
