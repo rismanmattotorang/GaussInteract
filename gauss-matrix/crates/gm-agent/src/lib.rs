@@ -52,6 +52,7 @@ pub mod catalog;
 pub mod clock;
 pub mod events;
 pub mod mcp;
+pub mod memory;
 pub mod policy;
 pub mod replay;
 pub mod resources;
@@ -63,6 +64,7 @@ use crate::catalog::{DiscoverableTool, ToolCatalog};
 use crate::clock::{Clock, SystemClock};
 use crate::events::ReflectedEvent;
 use crate::mcp::{ToolCall, ToolExecutor};
+use crate::memory::{MemoryError, MemoryItem};
 use crate::policy::{Effect, PolicySet};
 use crate::resources::{
     render_timeline, room_from_uri, room_resource_uri, McpResource, ResourceContents, RoomContext,
@@ -70,7 +72,7 @@ use crate::resources::{
 use crate::roster::AgentRoster;
 use gm_obs::Metrics;
 use gm_store::{audit, MemoryStore, Store};
-use gm_util::AgentId;
+use gm_util::{AgentId, RoomId};
 use std::fmt;
 
 /// The rate-limit window: tool calls per agent are counted over this many
@@ -249,6 +251,143 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
     /// [`replay::SessionReplay`] per agent, in first-appearance order.
     pub fn replay_all(&self) -> Vec<replay::SessionReplay> {
         replay::replay_all(&self.store)
+    }
+
+    /// Store a durable memory item for the agent, scoped to `room` (spec §IV).
+    /// The write is refused (and audited `memory_denied`) if the grant does not
+    /// permit `room` — agent memory can never escape the capability scope. A key
+    /// containing the reserved separator is rejected. The write is audited
+    /// `memory_stored` on the tamper-evident chain.
+    pub fn remember(
+        &mut self,
+        grant: &CapabilityGrant,
+        room: &RoomId,
+        key: &str,
+        value: &str,
+    ) -> Result<(), MemoryError> {
+        if !grant.permits_room(room) {
+            audit::append(
+                &mut self.store,
+                grant.agent.as_str(),
+                &format!("memory_denied: {room}/{key}"),
+            );
+            self.metrics.inc_counter(
+                "gm_agent_memory_ops_total",
+                &[("op", "store"), ("result", "denied")],
+            );
+            return Err(MemoryError::RoomNotPermitted(room.as_str().to_owned()));
+        }
+        memory::store(&mut self.store, &grant.agent, room, key, value)?;
+        audit::append(
+            &mut self.store,
+            grant.agent.as_str(),
+            &format!("memory_stored: {room}/{key}"),
+        );
+        self.metrics.inc_counter(
+            "gm_agent_memory_ops_total",
+            &[("op", "store"), ("result", "ok")],
+        );
+        Ok(())
+    }
+
+    /// Recall a single memory item by key, scoped to `room`. Refused (and
+    /// audited `memory_denied`) for a room outside the grant. The read is
+    /// audited `memory_recalled`.
+    pub fn recall(
+        &mut self,
+        grant: &CapabilityGrant,
+        room: &RoomId,
+        key: &str,
+    ) -> Result<Option<String>, MemoryError> {
+        if !grant.permits_room(room) {
+            audit::append(
+                &mut self.store,
+                grant.agent.as_str(),
+                &format!("memory_denied: {room}/{key}"),
+            );
+            self.metrics.inc_counter(
+                "gm_agent_memory_ops_total",
+                &[("op", "recall"), ("result", "denied")],
+            );
+            return Err(MemoryError::RoomNotPermitted(room.as_str().to_owned()));
+        }
+        let value = memory::recall(&self.store, &grant.agent, room, key);
+        audit::append(
+            &mut self.store,
+            grant.agent.as_str(),
+            &format!("memory_recalled: {room}/{key}"),
+        );
+        self.metrics.inc_counter(
+            "gm_agent_memory_ops_total",
+            &[("op", "recall"), ("result", "ok")],
+        );
+        Ok(value)
+    }
+
+    /// Recall all of the agent's memory items scoped to `room`, key-ordered.
+    /// Refused (and audited `memory_denied`) for a room outside the grant.
+    pub fn recall_all(
+        &mut self,
+        grant: &CapabilityGrant,
+        room: &RoomId,
+    ) -> Result<Vec<MemoryItem>, MemoryError> {
+        if !grant.permits_room(room) {
+            audit::append(
+                &mut self.store,
+                grant.agent.as_str(),
+                &format!("memory_denied: {room}/*"),
+            );
+            self.metrics.inc_counter(
+                "gm_agent_memory_ops_total",
+                &[("op", "recall_all"), ("result", "denied")],
+            );
+            return Err(MemoryError::RoomNotPermitted(room.as_str().to_owned()));
+        }
+        let items = memory::recall_all(&self.store, &grant.agent, room);
+        audit::append(
+            &mut self.store,
+            grant.agent.as_str(),
+            &format!("memory_recalled: {room}/* ({})", items.len()),
+        );
+        self.metrics.inc_counter(
+            "gm_agent_memory_ops_total",
+            &[("op", "recall_all"), ("result", "ok")],
+        );
+        Ok(items)
+    }
+
+    /// Forget a single memory item by key, scoped to `room`. Refused (and
+    /// audited `memory_denied`) for a room outside the grant. The deletion is
+    /// audited `memory_forgotten`.
+    pub fn forget(
+        &mut self,
+        grant: &CapabilityGrant,
+        room: &RoomId,
+        key: &str,
+    ) -> Result<(), MemoryError> {
+        if !grant.permits_room(room) {
+            audit::append(
+                &mut self.store,
+                grant.agent.as_str(),
+                &format!("memory_denied: {room}/{key}"),
+            );
+            self.metrics.inc_counter(
+                "gm_agent_memory_ops_total",
+                &[("op", "forget"), ("result", "denied")],
+            );
+            return Err(MemoryError::RoomNotPermitted(room.as_str().to_owned()));
+        }
+        memory::forget(&mut self.store, &grant.agent, room, key);
+        audit::append(
+            &mut self.store,
+            grant.agent.as_str(),
+            &format!("memory_forgotten: {room}/{key}"),
+        );
+        self.metrics.inc_counter(
+            "gm_agent_memory_ops_total",
+            &[("op", "forget"), ("result", "ok")],
+        );
+        Ok(())
     }
 
     /// Stream this gateway's durable audit log to a SIEM sink as structured
@@ -1168,6 +1307,67 @@ mod tests {
                 Outcome::Executed { .. }
             ));
         }
+    }
+
+    #[test]
+    fn agent_memory_round_trips_within_a_granted_room_and_is_audited() {
+        let room = RoomId::parse(ROOM).unwrap();
+        let mut gw = AgentGateway::new();
+        let g = grant();
+
+        gw.remember(&g, &room, "task", "summarise the thread")
+            .unwrap();
+        assert_eq!(
+            gw.recall(&g, &room, "task").unwrap().as_deref(),
+            Some("summarise the thread")
+        );
+        assert_eq!(gw.recall_all(&g, &room).unwrap().len(), 1);
+
+        gw.forget(&g, &room, "task").unwrap();
+        assert_eq!(gw.recall(&g, &room, "task").unwrap(), None);
+
+        // Store/recall/recall_all/forget/recall = 5 memory ops, all audited, and
+        // the chain stays intact.
+        assert_eq!(
+            gw.metrics().counter(
+                "gm_agent_memory_ops_total",
+                &[("op", "store"), ("result", "ok")]
+            ),
+            1
+        );
+        assert_eq!(gw.verify_audit(), Ok(()));
+        // The memory ops show up in the agent's replay.
+        let session = gw.replay_session(AGENT);
+        assert!(session
+            .steps
+            .iter()
+            .any(|s| s.kind == crate::replay::StepKind::Memory));
+    }
+
+    #[test]
+    fn agent_memory_is_refused_for_a_room_outside_the_grant() {
+        let secret = RoomId::parse("!secret:gaussian.tech").unwrap();
+        let mut gw = AgentGateway::new();
+        let g = grant();
+        assert_eq!(
+            gw.remember(&g, &secret, "k", "v"),
+            Err(crate::memory::MemoryError::RoomNotPermitted(
+                "!secret:gaussian.tech".to_owned()
+            ))
+        );
+        // Nothing was stored, and the denial is on the audit chain.
+        assert!(gw
+            .recall_all(&g, &RoomId::parse(ROOM).unwrap())
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            gw.metrics().counter(
+                "gm_agent_memory_ops_total",
+                &[("op", "store"), ("result", "denied")]
+            ),
+            1
+        );
+        assert_eq!(gw.verify_audit(), Ok(()));
     }
 
     #[test]
