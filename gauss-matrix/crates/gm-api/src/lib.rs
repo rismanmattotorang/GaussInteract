@@ -22,10 +22,12 @@
 pub mod auth;
 pub mod error;
 pub mod events;
+pub mod json;
 pub mod pdu;
 pub mod room_version;
 
 pub use auth::{NoAuthority, TokenAuthority};
 pub use error::MatrixError;
+pub use json::Json;
 pub use pdu::Pdu;
 pub use room_version::RoomVersion;
