@@ -77,7 +77,8 @@ the incumbents can't enter.
 | Capability grant as room state | ✅ | ✗ | ✗ | ✗ |
 | MCP tool mediation + scoped discovery | ✅ | ✗ | ✗ | ✗ |
 | Human-in-the-loop approval | ✅ | ✗ | ✗ | ✗ |
-| Per-agent rate + daily budgets | ✅ | ✗ | ✗ | ✗ |
+| Per-agent rate + daily call budgets | ✅ | ✗ | ✗ | ✗ |
+| Per-agent **token/cost budgets** (FinOps) | ✅ | ✗ | ✗ | ✗ |
 | Tamper-evident audit → SIEM | ✅ | partial | partial | partial |
 | Mature chat UX / ecosystem | ◦ (catch-up) | ✅ | ✅ | ✅ |
 
@@ -88,21 +89,24 @@ the incumbents can't enter.
 2. Capability grant as validated, federated **room state** — ✅ `gm-agent::capability`
 3. MCP tool-call **mediation** (scope → rate → human-in-the-loop → reflect) — ✅ `gm-agent`
 4. **MCP tool catalog + capability-scoped discovery** — ✅ **delivered this pass** (`gm-agent::catalog`)
-5. **Usage governance: per-minute rate + per-day budgets** — ✅ **delivered this pass**
+5. **Usage governance: per-minute rate + per-day call budgets** — ✅ `gm-agent`
 6. Scoped MCP **resources** (read only granted rooms) — ✅ `gm-agent::resources`
 7. **Tamper-evident audit + SIEM streaming + Prometheus** — ✅ `gm-store`/`gm-obs`
+8. **Cost/token accounting (agentic FinOps)** — ✅ **delivered this pass**
+   (`CapabilityGrant.daily_token_budget`, day-rolling token ledger, denial +
+   `gm_agent_tokens_total` metric; client mirror parses and renders it)
 
 ### Next moat increments (queued — these widen the lead):
-8. **Multi-agent orchestration** — multiple agents in a room with inter-agent
+9. **Multi-agent orchestration** — multiple agents in a room with inter-agent
    tool mediation and per-agent attribution in the audit chain.
-9. **Declarative policy engine** — grants expressed as policy (allow/deny rules,
-   conditions) beyond per-tool classification; versioned as room state.
-10. **Cost/token accounting** — budgets in tokens and cost, not just call counts
-    (agentic FinOps a centralised assistant won't expose to the customer).
+10. **Declarative policy engine** — grants expressed as policy (allow/deny rules,
+    conditions) beyond per-tool classification; versioned as room state.
 11. **Agent memory/context rooms** — scoped, durable agent context with the same
     E2EE and audit guarantees.
 12. **Replayable agent sessions** — reconstruct exactly what an agent saw/did
     from the audit chain (incident review).
+13. **Resolved-state cache** (§III.D) — ✅ memoised conflict resolution in
+    `gm-stateres::CachedResolver`.
 
 ### Catch-up (table-stakes — via ROADMAP, not a differentiator):
 - Phase 1–2: `gauss-core` (matrix-rust-sdk + vodozemac + uniffi); the live
@@ -112,19 +116,26 @@ the incumbents can't enter.
 
 ## What this pass executed
 
-Two moat capabilities (#4, #5), in `gm-agent`, std-only and tested:
+Two spec-aligned increments, std-only and tested:
 
-- **`catalog`** — `ToolCatalog` / `ToolSpec`; `AgentGateway::list_tools(grant,
-  catalog)` returns only the tools an agent's grant permits, each tagged with
-  the grant's classification — the inbound "tools/list" mirror of the gateway's
-  least-privilege mediation.
-- **Daily usage budgets** — `CapabilityGrant.daily_call_limit` (round-tripped
-  through `m.gauss.agent.capability` content, optional for backward compat), with
-  a per-agent day-rolling ledger enforced in `handle()` before execution:
-  over-budget calls are denied, audited (`daily_budget_exceeded`), and counted
-  (`gm_agent_actions_total{outcome="budget_exceeded"}`).
+- **Cost/token accounting (#8, `gm-agent`)** — `ToolOutcome.tokens` meters each
+  execution; `CapabilityGrant.daily_token_budget` (round-tripped through
+  `m.gauss.agent.capability` content, optional for backward compat) caps daily
+  token spend. A per-agent day-rolling ledger now tracks calls *and* tokens
+  together; `handle()` denies a call whose agent has already spent its token
+  budget (audited `token_budget_exceeded`, counted
+  `gm_agent_actions_total{outcome="token_budget_exceeded"}`), and consumed tokens
+  are accounted to `gm_agent_tokens_total{agent}` on every execution (auto and
+  post-approval). The GaussInteract client mirror
+  (`lib/utils/gauss_core/gauss_core.dart`) parses both daily budgets and the
+  capability view renders them.
+- **Resolved-state cache (§III.D, `gm-stateres`)** — `CachedResolver` memoises
+  conflict resolution keyed by the (immutable) set of conflicting event ids, so
+  recurrent conflicts are not recomputed; unconflicted slots always merge live.
+  Exposes `hits`/`misses`/`cached_entries`, and is verified to match the uncached
+  path.
 
-Verified: **72 workspace tests**, `clippy -D warnings` clean, `rustfmt` clean.
+Verified: **77 workspace tests**, `clippy -D warnings` clean, `rustfmt` clean.
 
 ## How we'll know we've won
 

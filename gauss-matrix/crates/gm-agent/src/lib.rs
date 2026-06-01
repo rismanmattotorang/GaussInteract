@@ -157,8 +157,8 @@ pub struct AgentGateway<S: Store = MemoryStore, C: Clock = SystemClock> {
     clock: C,
     /// `(agent, unix_secs)` of admitted calls, for sliding-window rate limiting.
     recent_calls: Vec<(String, u64)>,
-    /// Per-agent daily usage: `agent -> (unix_day, calls_today)`.
-    daily_usage: std::collections::HashMap<String, (u64, u32)>,
+    /// Per-agent daily usage: `agent -> (unix_day, calls_today, tokens_today)`.
+    daily_usage: std::collections::HashMap<String, (u64, u32, u64)>,
     metrics: Metrics,
 }
 
@@ -359,28 +359,49 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
         self.clock.now_unix_secs() / 86_400
     }
 
-    /// Whether `agent` has exhausted its *daily* budget. A limit of `0` means
-    /// unlimited. Rolls the counter over at the day boundary.
+    /// Get `agent`'s daily-usage entry, rolling it over (zeroing calls *and*
+    /// tokens) if the recorded day is not today, so both budgets reset together.
+    fn daily_entry(&mut self, agent: &str) -> &mut (u64, u32, u64) {
+        let day = self.current_day();
+        let entry = self
+            .daily_usage
+            .entry(agent.to_owned())
+            .or_insert((day, 0, 0));
+        if entry.0 != day {
+            *entry = (day, 0, 0);
+        }
+        entry
+    }
+
+    /// Whether `agent` has exhausted its *daily call* budget. A limit of `0`
+    /// means unlimited. Rolls the counter over at the day boundary.
     fn is_over_daily_budget(&mut self, agent: &str, daily_limit: u32) -> bool {
         if daily_limit == 0 {
             return false;
         }
-        let day = self.current_day();
-        let entry = self.daily_usage.entry(agent.to_owned()).or_insert((day, 0));
-        if entry.0 != day {
-            *entry = (day, 0);
-        }
-        entry.1 >= daily_limit
+        self.daily_entry(agent).1 >= daily_limit
     }
 
-    /// Record that `agent` consumed one unit of its daily budget today.
-    fn note_daily_call(&mut self, agent: &str) {
-        let day = self.current_day();
-        let entry = self.daily_usage.entry(agent.to_owned()).or_insert((day, 0));
-        if entry.0 != day {
-            *entry = (day, 0);
+    /// Whether `agent` has exhausted its *daily token* budget. A budget of `0`
+    /// means unlimited. Checked *before* execution: an agent that has already
+    /// spent its budget starts no new work (the budget is a ceiling on
+    /// initiating activity, so a single call may finish slightly over it).
+    fn is_over_token_budget(&mut self, agent: &str, token_budget: u64) -> bool {
+        if token_budget == 0 {
+            return false;
         }
-        entry.1 += 1;
+        self.daily_entry(agent).2 >= token_budget
+    }
+
+    /// Record that `agent` consumed one unit of its daily call budget today.
+    fn note_daily_call(&mut self, agent: &str) {
+        self.daily_entry(agent).1 += 1;
+    }
+
+    /// Record that `agent` consumed `tokens` of its daily token budget today.
+    fn note_tokens(&mut self, agent: &str, tokens: u64) {
+        let entry = self.daily_entry(agent);
+        entry.2 = entry.2.saturating_add(tokens);
     }
 
     /// The tools an agent may *discover* over MCP: those in `catalog` its grant
@@ -458,6 +479,21 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 events: Vec::new(),
             };
         }
+        if self.is_over_token_budget(call.agent.as_str(), grant.daily_token_budget) {
+            audit::append(
+                &mut self.store,
+                call.agent.as_str(),
+                &format!("token_budget_exceeded: {}", call.tool),
+            );
+            self.record_outcome("token_budget_exceeded");
+            return Outcome::Denied {
+                reason: format!(
+                    "daily token budget of {} exceeded for {}",
+                    grant.daily_token_budget, call.agent
+                ),
+                events: Vec::new(),
+            };
+        }
         self.note_call(call.agent.as_str());
         self.note_daily_call(call.agent.as_str());
         match class {
@@ -472,10 +508,19 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 let call_event =
                     ReflectedEvent::tool_call(&call_id, &call.tool, &call.args_summary);
                 let outcome = executor.execute(&call);
+                self.note_tokens(call.agent.as_str(), outcome.tokens);
                 audit::append(
                     &mut self.store,
                     call.agent.as_str(),
-                    &format!("executed: {} ok={}", call.tool, outcome.ok),
+                    &format!(
+                        "executed: {} ok={} tokens={}",
+                        call.tool, outcome.ok, outcome.tokens
+                    ),
+                );
+                self.metrics.add_counter(
+                    "gm_agent_tokens_total",
+                    &[("agent", call.agent.as_str())],
+                    outcome.tokens,
                 );
                 let result_event =
                     ReflectedEvent::tool_result(&call_id, &call.tool, outcome.ok, &outcome.summary);
@@ -532,10 +577,19 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
                 &format!("approved_by {}: {}", decided_by, pending.call.tool),
             );
             let outcome = executor.execute(&pending.call);
+            self.note_tokens(pending.call.agent.as_str(), outcome.tokens);
             audit::append(
                 &mut self.store,
                 pending.call.agent.as_str(),
-                &format!("executed: {} ok={}", pending.call.tool, outcome.ok),
+                &format!(
+                    "executed: {} ok={} tokens={}",
+                    pending.call.tool, outcome.ok, outcome.tokens
+                ),
+            );
+            self.metrics.add_counter(
+                "gm_agent_tokens_total",
+                &[("agent", pending.call.agent.as_str())],
+                outcome.tokens,
             );
             let result_event = ReflectedEvent::tool_result(
                 &pending.call_id,
@@ -907,6 +961,67 @@ mod tests {
             Outcome::Executed { .. }
         ));
         assert_eq!(gw.verify_audit(), Ok(()));
+    }
+
+    #[test]
+    fn token_budget_blocks_once_spent_and_resets_next_day() {
+        use gm_util::{AgentId, RoomId};
+        // EchoExecutor meters len("search") + len("args") = 6 + 4 = 10 tokens
+        // per call. A budget of 15 admits the first call (spend 10, still under),
+        // then the second sees 10 >= 15? no — so it admits and spends to 20, and
+        // the third is refused. Set the budget to 10 so exactly one call fits.
+        let grant = CapabilityGrant::deny_all(AgentId::parse(AGENT).unwrap())
+            .allow_room(RoomId::parse(ROOM).unwrap())
+            .allow_tool("search", ActionClass::Auto)
+            .with_daily_token_budget(10);
+        let mut gw = gateway_at(1_000);
+        let mut exec = EchoExecutor;
+
+        // First call: budget not yet spent, executes and consumes 10 tokens.
+        assert!(matches!(
+            gw.handle(&grant, call("search"), &mut exec),
+            Outcome::Executed { .. }
+        ));
+        // Second call: 10 tokens already spent >= budget of 10, refused.
+        match gw.handle(&grant, call("search"), &mut exec) {
+            Outcome::Denied { reason, .. } => assert!(reason.contains("token budget")),
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        assert_eq!(
+            gw.metrics().counter(
+                "gm_agent_actions_total",
+                &[("outcome", "token_budget_exceeded")]
+            ),
+            1
+        );
+        assert_eq!(
+            gw.metrics()
+                .counter("gm_agent_tokens_total", &[("agent", AGENT)]),
+            10
+        );
+        // A day later the token budget resets and a call goes through again.
+        gw.clock.advance(86_400);
+        assert!(matches!(
+            gw.handle(&grant, call("search"), &mut exec),
+            Outcome::Executed { .. }
+        ));
+        assert_eq!(gw.verify_audit(), Ok(()));
+    }
+
+    #[test]
+    fn zero_token_budget_means_unlimited() {
+        use gm_util::{AgentId, RoomId};
+        let grant = CapabilityGrant::deny_all(AgentId::parse(AGENT).unwrap())
+            .allow_room(RoomId::parse(ROOM).unwrap())
+            .allow_tool("search", ActionClass::Auto); // daily_token_budget defaults to 0
+        let mut gw = gateway_at(1_000);
+        let mut exec = EchoExecutor;
+        for _ in 0..5 {
+            assert!(matches!(
+                gw.handle(&grant, call("search"), &mut exec),
+                Outcome::Executed { .. }
+            ));
+        }
     }
 
     #[test]

@@ -82,6 +82,10 @@ pub struct CapabilityGrant {
     /// Maximum tool calls per day (0 = unlimited) — a longer-horizon usage
     /// budget complementing the per-minute rate limit (agentic governance).
     pub daily_call_limit: u32,
+    /// Maximum tokens the agent may consume per day (0 = unlimited). Budgets the
+    /// *cost* of agent activity, not just its call count — agentic FinOps a
+    /// centralised assistant won't expose to the customer (§IV.C).
+    pub daily_token_budget: u64,
     /// Default classification for tools without an explicit override.
     pub default_class: ActionClass,
     /// Per-tool classification overrides (high-impact tools default to review).
@@ -97,6 +101,7 @@ impl CapabilityGrant {
             accessible_rooms: Vec::new(),
             rate_limit_per_min: 0,
             daily_call_limit: 0,
+            daily_token_budget: 0,
             default_class: ActionClass::Forbidden,
             overrides: Vec::new(),
         }
@@ -127,6 +132,12 @@ impl CapabilityGrant {
     /// Set the per-day call budget (builder-style).
     pub fn with_daily_limit(mut self, per_day: u32) -> Self {
         self.daily_call_limit = per_day;
+        self
+    }
+
+    /// Set the per-day token budget (builder-style).
+    pub fn with_daily_token_budget(mut self, tokens_per_day: u64) -> Self {
+        self.daily_token_budget = tokens_per_day;
         self
     }
 
@@ -181,6 +192,10 @@ impl CapabilityGrant {
         content.insert(
             "daily_call_limit".into(),
             Value::U64(u64::from(self.daily_call_limit)),
+        );
+        content.insert(
+            "daily_token_budget".into(),
+            Value::U64(self.daily_token_budget),
         );
         content.insert(
             "default_class".into(),
@@ -254,6 +269,14 @@ impl CapabilityGrant {
             None => 0,
         };
 
+        // Optional for backward compatibility, as with daily_call_limit.
+        let daily_token_budget = match content.get("daily_token_budget") {
+            Some(value) => value
+                .as_u64()
+                .ok_or(CapabilityError::InvalidField("daily_token_budget"))?,
+            None => 0,
+        };
+
         let default_class = field(content, "default_class")?
             .as_str()
             .and_then(ActionClass::parse)
@@ -292,6 +315,7 @@ impl CapabilityGrant {
             accessible_rooms,
             rate_limit_per_min,
             daily_call_limit,
+            daily_token_budget,
             default_class,
             overrides,
         })
@@ -355,6 +379,7 @@ mod tests {
             .allow_tool("send_email", ActionClass::Review)
             .with_rate_limit(30)
             .with_daily_limit(500)
+            .with_daily_token_budget(1_000_000)
     }
 
     #[test]
@@ -363,6 +388,7 @@ mod tests {
         let restored = CapabilityGrant::from_content(&grant.to_content()).unwrap();
         assert_eq!(restored, grant);
         assert_eq!(restored.daily_call_limit, 500);
+        assert_eq!(restored.daily_token_budget, 1_000_000);
         assert_eq!(grant.to_event().event_type, "m.gauss.agent.capability");
     }
 
@@ -373,6 +399,15 @@ mod tests {
         content.remove("daily_call_limit");
         let restored = CapabilityGrant::from_content(&content).unwrap();
         assert_eq!(restored.daily_call_limit, 0); // unlimited
+    }
+
+    #[test]
+    fn daily_token_budget_defaults_to_zero_when_absent_from_content() {
+        // Older content (or the client mirror) omits daily_token_budget.
+        let mut content = sample_grant().to_content();
+        content.remove("daily_token_budget");
+        let restored = CapabilityGrant::from_content(&content).unwrap();
+        assert_eq!(restored.daily_token_budget, 0); // unlimited
     }
 
     #[test]

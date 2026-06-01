@@ -26,6 +26,12 @@ class AgentCapabilityView extends StatelessWidget {
     final rateLimit = grant.rateLimitPerMin == 0
         ? l10n.agentUnlimited
         : '${grant.rateLimitPerMin}/min';
+    final dailyCalls = grant.dailyCallLimit == 0
+        ? l10n.agentUnlimited
+        : '${grant.dailyCallLimit}/day';
+    final tokenBudget = grant.dailyTokenBudget == 0
+        ? l10n.agentUnlimited
+        : l10n.agentTokensPerDay(grant.dailyTokenBudget);
 
     return Card(
       elevation: 0,
@@ -63,7 +69,9 @@ class AgentCapabilityView extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              '${l10n.agentRateLimit}: $rateLimit',
+              '${l10n.agentRateLimit}: $rateLimit'
+              '  ·  ${l10n.agentDailyCalls}: $dailyCalls'
+              '  ·  ${l10n.agentTokenBudget}: $tokenBudget',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: colors.onSurfaceVariant,
               ),
