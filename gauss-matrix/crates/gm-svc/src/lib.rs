@@ -19,9 +19,11 @@
 
 pub mod accounts;
 mod codec;
+pub mod server;
 pub mod session;
 
 pub use accounts::AccountStore;
+pub use server::GaussServer;
 pub use session::SessionStore;
 
 use gm_api::Pdu;

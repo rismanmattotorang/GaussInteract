@@ -24,16 +24,19 @@ use gm_util::UserId;
 use std::hash::{Hash, Hasher};
 
 /// Persists access-token → user mappings and validates tokens.
+///
+/// Stateless over its store (no in-memory counter), so several short-lived
+/// `SessionStore` views over the *same* shared store stay consistent — which is
+/// how the composed server constructs one per request.
 #[derive(Debug)]
 pub struct SessionStore<S: Store> {
     store: S,
-    counter: u64,
 }
 
 impl<S: Store> SessionStore<S> {
     /// Create a session store over a storage backend.
     pub fn new(store: S) -> Self {
-        Self { store, counter: 0 }
+        Self { store }
     }
 
     /// Mint a new access token for `user`, persist the mapping, and return it.
@@ -57,13 +60,14 @@ impl<S: Store> SessionStore<S> {
             .and_then(|s| UserId::parse(s).ok())
     }
 
-    /// Derive a unique (scaffold, not unguessable) token for `user`.
+    /// Derive a unique (scaffold, not unguessable) token for `user`. Uniqueness
+    /// comes from the live token count in the store, so it is stable across
+    /// `SessionStore` instances sharing that store.
     fn mint(&mut self, user: &UserId) -> String {
-        self.counter += 1;
         let mut h = std::collections::hash_map::DefaultHasher::new();
         user.as_str().hash(&mut h);
         0xA7u8.hash(&mut h); // domain separator
-        self.counter.hash(&mut h);
+        self.store.count(cf::ACCESS_TOKENS).hash(&mut h);
         format!("gmt_{:016x}", h.finish())
     }
 }

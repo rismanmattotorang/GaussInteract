@@ -151,6 +151,8 @@ name = "gm-http"
 version = "0.0.1"
 dependencies = [
  "gm-api",
+ "gm-store",
+ "gm-svc",
  "gm-util",
 ]
 

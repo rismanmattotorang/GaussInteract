@@ -22,10 +22,12 @@ pub mod audit;
 mod memory;
 #[cfg(feature = "rocksdb")]
 mod rocks;
+mod shared;
 
 pub use memory::MemoryStore;
 #[cfg(feature = "rocksdb")]
 pub use rocks::RocksStore;
+pub use shared::SharedStore;
 
 /// Explicit, per-domain column families (spec §III.C). Named rather than
 /// stringly-typed at call sites so the storage domains are enumerable.
