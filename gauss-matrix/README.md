@@ -57,6 +57,8 @@ gauss-matrix/
     │       ├── error.rs        # Matrix CS error model (M_*)
     │       ├── events.rs       # core m.room.* event types
     │       └── pdu.rs          # the PDU envelope (auth/depth/state)
+    ├── gm-stateres/      # state-resolution core (§III.D)
+    │   └── src/lib.rs        # conflicted/unconflicted partition + deterministic resolve
     └── gm-obs/           # observability (§VIII.A)
         └── src/
             ├── metrics.rs    # Prometheus-compatible counters/gauges
@@ -127,9 +129,9 @@ metrics — the same loop the GaussInteract client renders.
 
 ## Remaining crates (spec §III.B)
 
-`gm-http` · `gm-svc` · `gm-stateres` · `gm-fed` · `gm-e2ee` ·
-`gm-shard` — added as implemented (`gm-agent`, `gm-store`, `gm-util`, `gm-api`
-and `gm-obs` are in place). `gm-store`'s **RocksDB** backend is real, behind the
+`gm-http` · `gm-svc` · `gm-fed` · `gm-e2ee` · `gm-shard` — added as implemented
+(`gm-agent`, `gm-store`, `gm-util`, `gm-api`, `gm-stateres` and `gm-obs` are in
+place). `gm-store`'s **RocksDB** backend is real, behind the
 `rocksdb` feature (`cargo test -p gm-store --features rocksdb`; CI builds it via
 `--all-features`). The remaining live `gm-agent` wiring (Application Service
 registration for cross-signed agent identities, the MCP transport, and

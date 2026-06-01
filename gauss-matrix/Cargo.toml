@@ -14,6 +14,7 @@ members = [
     "crates/gm-agent",
     "crates/gm-api",
     "crates/gm-obs",
+    "crates/gm-stateres",
     "crates/gm-store",
     "crates/gm-util",
 ]

@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "gm-stateres"
+description = "GaussMatrix state-resolution engine: the conflicted/unconflicted partition and deterministic conflict resolution over room state."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "gm_stateres"
+
+[dependencies]
+gm-api = { path = "../gm-api" }
+gm-util = { path = "../gm-util" }
+# The parallelised engine (bounded worker pool, resolved-state cache, room
+# versions 1–12) and the full state-resolution v2 ordering layer on top of the
+# deterministic core defined here (spec §III.D).
+
+[dev-dependencies]

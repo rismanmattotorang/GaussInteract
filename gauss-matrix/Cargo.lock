@@ -139,6 +139,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gm-stateres"
+version = "0.0.1"
+dependencies = [
+ "gm-api",
+ "gm-util",
+]
+
+[[package]]
 name = "gm-store"
 version = "0.0.1"
 dependencies = [
