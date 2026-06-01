@@ -21,3 +21,6 @@ gm-util = { path = "../gm-util" }
 # the service core (spec §III.B); this crate pins the surface it must expose.
 
 [dev-dependencies]
+# Integration tests drive the ingress against the real composed service core.
+gm-svc = { path = "../gm-svc" }
+gm-store = { path = "../gm-store" }
