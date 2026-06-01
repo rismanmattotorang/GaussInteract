@@ -32,4 +32,4 @@ pub use error::MatrixError;
 pub use json::Json;
 pub use pdu::Pdu;
 pub use room_version::RoomVersion;
-pub use server::{Homeserver, NoServer, RoomReader};
+pub use server::{Homeserver, Login, LoginGrant, NoServer, RoomReader};
