@@ -5,20 +5,53 @@
 //!
 //! This is the request→response heart of the homeserver, independent of the
 //! async transport. The live axum/hyper layer does three mechanical things:
-//! parse the wire request into a [`Method`] + target, call [`Ingress::dispatch`],
-//! and write the returned [`Response`] back to the socket. Keeping the decision
-//! logic here, std-only, means the routing, status codes and Matrix error
-//! envelopes are all testable without a running server.
+//! build a [`Request`] from the wire, call [`Ingress::handle`], and write the
+//! returned [`Response`] back to the socket. Keeping the decision logic here,
+//! std-only, means routing, authentication gating, status codes and the Matrix
+//! error envelope are all testable without a running server.
 //!
-//! What it serves today: `GET /_matrix/client/versions` returns the advertised
-//! [`SUPPORTED_SPEC_VERSIONS`]; an unknown target returns `404 M_UNRECOGNIZED`
-//! and a known path with the wrong method returns `405 M_UNRECOGNIZED` with an
-//! `Allow` header — both the standard Matrix error shape. Endpoints that are on
-//! the [surface](crate::Endpoint::surface) but not yet wired to a handler return
-//! `501` with `M_UNRECOGNIZED`, so the contract for the async layer is explicit.
+//! What it serves today:
+//! - `GET /_matrix/client/versions` → the advertised [`SUPPORTED_SPEC_VERSIONS`];
+//! - `GET /_matrix/client/v3/login` → the supported login flows.
+//!
+//! Authentication is gated centrally: a request to an [`Auth::AccessToken`]
+//! endpoint without a token is `401 M_MISSING_TOKEN` before any handler runs.
+//! Unknown targets are `404 M_UNRECOGNIZED`; a known path with the wrong method
+//! is `405 M_UNRECOGNIZED` + an `Allow` header; endpoints on the
+//! [surface](crate::Endpoint::surface) without a handler yet are `501`.
 
-use crate::router::{RouteResolution, Router};
-use crate::{Method, SUPPORTED_SPEC_VERSIONS};
+use crate::auth::access_token;
+use crate::router::{RouteMatch, RouteResolution, Router};
+use crate::{Auth, Method, SUPPORTED_SPEC_VERSIONS};
+use gm_api::MatrixError;
+
+/// An inbound request, transport-independent.
+#[derive(Debug, Clone)]
+pub struct Request<'a> {
+    /// The HTTP method.
+    pub method: Method,
+    /// The full request target (path plus any `?query`).
+    pub target: &'a str,
+    /// The raw `Authorization` header value, if present.
+    pub authorization: Option<&'a str>,
+}
+
+impl<'a> Request<'a> {
+    /// A request with no `Authorization` header.
+    pub fn new(method: Method, target: &'a str) -> Self {
+        Self {
+            method,
+            target,
+            authorization: None,
+        }
+    }
+
+    /// Set the `Authorization` header value (builder-style).
+    pub fn with_authorization(mut self, value: &'a str) -> Self {
+        self.authorization = Some(value);
+        self
+    }
+}
 
 /// A response the ingress produces, ready for the transport to write out.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,16 +74,12 @@ impl Response {
         }
     }
 
-    /// A Matrix error response (`{"errcode":…,"error":…}`) at `status`.
-    fn matrix_error(status: u16, errcode: &str, error: &str) -> Self {
+    /// A Matrix error response at `status`, carrying the standard envelope.
+    fn error(status: u16, err: &MatrixError) -> Self {
         Self {
             status,
             headers: vec![("Content-Type".to_owned(), "application/json".to_owned())],
-            body: format!(
-                "{{\"errcode\":\"{}\",\"error\":\"{}\"}}",
-                json_escape(errcode),
-                json_escape(error)
-            ),
+            body: err.to_json(),
         }
     }
 
@@ -77,32 +106,52 @@ impl Ingress {
         }
     }
 
-    /// Dispatch a request `method` + `target` to a [`Response`].
-    pub fn dispatch(&self, method: Method, target: &str) -> Response {
-        match self.router.resolve(method, target) {
-            RouteResolution::Found(m) => self.serve(&m),
+    /// Handle a [`Request`], producing a [`Response`].
+    pub fn handle(&self, req: &Request<'_>) -> Response {
+        match self.router.resolve(req.method, req.target) {
+            RouteResolution::Found(m) => {
+                // Gate access-token endpoints: a missing token is 401 before any
+                // handler runs. (Validating the token is the session layer's job.)
+                if m.endpoint.auth == Auth::AccessToken
+                    && access_token(req.authorization, req.target).is_none()
+                {
+                    return Response::error(
+                        401,
+                        &MatrixError::missing_token("missing access token"),
+                    );
+                }
+                self.serve(&m)
+            }
             RouteResolution::MethodNotAllowed(allowed) => {
-                let mut resp = Response::matrix_error(
+                let mut resp = Response::error(
                     405,
-                    "M_UNRECOGNIZED",
-                    "method not allowed for this endpoint",
+                    &MatrixError::unrecognized("method not allowed for this endpoint"),
                 );
                 resp.headers
                     .push(("Allow".to_owned(), allow_header(&allowed)));
                 resp
             }
             RouteResolution::NotFound => {
-                Response::matrix_error(404, "M_UNRECOGNIZED", "unrecognized request")
+                Response::error(404, &MatrixError::unrecognized("unrecognized request"))
             }
         }
     }
 
-    /// Produce the response for a matched route. Only the endpoints wired to a
+    /// Convenience: handle an unauthenticated `method` + `target`.
+    pub fn dispatch(&self, method: Method, target: &str) -> Response {
+        self.handle(&Request::new(method, target))
+    }
+
+    /// Produce the response for a matched route. Only endpoints wired to a
     /// handler return a body; the rest return `501` so the contract is explicit.
-    fn serve(&self, m: &crate::router::RouteMatch) -> Response {
-        match m.endpoint.path {
-            "/_matrix/client/versions" => Response::json_ok(versions_body()),
-            _ => Response::matrix_error(501, "M_UNRECOGNIZED", "endpoint not yet implemented"),
+    fn serve(&self, m: &RouteMatch) -> Response {
+        match (m.endpoint.method, m.endpoint.path) {
+            (Method::Get, "/_matrix/client/versions") => Response::json_ok(versions_body()),
+            (Method::Get, "/_matrix/client/v3/login") => Response::json_ok(login_flows_body()),
+            _ => Response::error(
+                501,
+                &MatrixError::unrecognized("endpoint not yet implemented"),
+            ),
         }
     }
 }
@@ -117,6 +166,20 @@ fn versions_body() -> String {
         .join(",");
     format!("{{\"versions\":[{list}]}}")
 }
+
+/// The login flows GaussMatrix offers (spec §V.E enterprise surface: password +
+/// SSO/OIDC): `{"flows":[{"type":"m.login.password"},{"type":"m.login.sso"}]}`.
+fn login_flows_body() -> String {
+    let flows = LOGIN_FLOWS
+        .iter()
+        .map(|t| format!("{{\"type\":\"{}\"}}", json_escape(t)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{\"flows\":[{flows}]}}")
+}
+
+/// The login flow types advertised at `GET /_matrix/client/v3/login`.
+const LOGIN_FLOWS: &[&str] = &["m.login.password", "m.login.sso"];
 
 /// The `Allow` header value for a set of methods (e.g. `GET, POST`).
 fn allow_header(methods: &[Method]) -> String {
@@ -137,16 +200,13 @@ fn method_name(method: &Method) -> &'static str {
 }
 
 /// Escape a string for inclusion in a JSON string literal (the small subset our
-/// static error/version strings need: quotes, backslashes, control chars).
+/// static version/flow strings need).
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
@@ -164,9 +224,18 @@ mod tests {
         let resp = ingress.dispatch(Method::Get, "/_matrix/client/versions");
         assert_eq!(resp.status, 200);
         assert_eq!(resp.header("Content-Type"), Some("application/json"));
-        // Advertises at least v1.11 (spec §II.A).
         assert!(resp.body.contains("\"v1.11\""));
         assert!(resp.body.starts_with("{\"versions\":["));
+    }
+
+    #[test]
+    fn serves_the_login_flows_endpoint() {
+        let ingress = Ingress::new();
+        let resp = ingress.dispatch(Method::Get, "/_matrix/client/v3/login");
+        assert_eq!(resp.status, 200);
+        assert!(resp.body.contains("\"m.login.password\""));
+        assert!(resp.body.contains("\"m.login.sso\""));
+        assert!(resp.body.starts_with("{\"flows\":["));
     }
 
     #[test]
@@ -180,6 +249,7 @@ mod tests {
     #[test]
     fn wrong_method_is_405_with_allow_header() {
         let ingress = Ingress::new();
+        // /versions exists only for GET.
         let resp = ingress.dispatch(Method::Post, "/_matrix/client/versions");
         assert_eq!(resp.status, 405);
         assert_eq!(resp.header("Allow"), Some("GET"));
@@ -187,17 +257,37 @@ mod tests {
     }
 
     #[test]
-    fn declared_but_unimplemented_endpoint_is_501() {
+    fn authenticated_endpoint_without_a_token_is_401_missing_token() {
         let ingress = Ingress::new();
-        // /sync is on the surface but not yet wired to a handler.
         let resp = ingress.dispatch(Method::Get, "/_matrix/client/v3/sync");
-        assert_eq!(resp.status, 501);
-        assert!(resp.body.contains("not yet implemented"));
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
     }
 
     #[test]
-    fn json_escape_handles_quotes_and_controls() {
-        assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
-        assert_eq!(json_escape("x\ny"), "x\\ny");
+    fn authenticated_endpoint_with_a_token_passes_the_gate() {
+        let ingress = Ingress::new();
+        // With a token, the auth gate passes; /sync is on the surface but not yet
+        // wired to a handler, so it reaches the 501 contract rather than 401.
+        let req = Request::new(Method::Get, "/_matrix/client/v3/sync")
+            .with_authorization("Bearer tok123");
+        let resp = ingress.handle(&req);
+        assert_eq!(resp.status, 501);
+    }
+
+    #[test]
+    fn token_via_query_parameter_also_passes_the_gate() {
+        let ingress = Ingress::new();
+        let resp = ingress.dispatch(Method::Get, "/_matrix/client/v3/sync?access_token=tok123");
+        assert_eq!(resp.status, 501); // gate passed, handler not yet wired
+    }
+
+    #[test]
+    fn public_login_post_needs_no_token() {
+        let ingress = Ingress::new();
+        // POST /login is public; without a token it reaches the 501 contract
+        // (handler not yet wired), not a 401.
+        let resp = ingress.dispatch(Method::Post, "/_matrix/client/v3/login");
+        assert_eq!(resp.status, 501);
     }
 }

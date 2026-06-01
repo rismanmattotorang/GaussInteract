@@ -41,6 +41,12 @@ impl MatrixError {
         Self::new("M_UNKNOWN_TOKEN", error)
     }
 
+    /// `M_MISSING_TOKEN` — no access token was supplied for an authenticated
+    /// endpoint.
+    pub fn missing_token(error: impl Into<String>) -> Self {
+        Self::new("M_MISSING_TOKEN", error)
+    }
+
     /// `M_LIMIT_EXCEEDED` — the client is being rate-limited.
     pub fn limit_exceeded(error: impl Into<String>) -> Self {
         Self::new("M_LIMIT_EXCEEDED", error)
@@ -97,6 +103,7 @@ mod tests {
         assert_eq!(MatrixError::forbidden("no").errcode, "M_FORBIDDEN");
         assert_eq!(MatrixError::not_found("no").errcode, "M_NOT_FOUND");
         assert_eq!(MatrixError::unknown_token("no").errcode, "M_UNKNOWN_TOKEN");
+        assert_eq!(MatrixError::missing_token("no").errcode, "M_MISSING_TOKEN");
     }
 
     #[test]
