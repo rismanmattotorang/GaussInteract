@@ -16,6 +16,9 @@
 #![warn(missing_docs)]
 #![deny(rust_2018_idioms)]
 
+pub mod ingress;
+pub mod router;
+
 /// Matrix specification versions GaussMatrix advertises at
 /// `/_matrix/client/versions` (spec §II.A requires ≥ v1.11).
 pub const SUPPORTED_SPEC_VERSIONS: &[&str] = &["v1.11"];
