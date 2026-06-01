@@ -49,8 +49,14 @@ gauss-matrix/
     │       └── audit.rs      # durable, tamper-evident audit log (§IV.D)
     ├── gm-util/          # shared primitives (§III.B)
     │   └── src/
-    │       ├── ids.rs        # validated UserId / RoomId / AgentId newtypes
+    │       ├── ids.rs        # validated UserId / RoomId / AgentId / EventId newtypes
     │       └── error.rs      # the common GmError
+    ├── gm-api/           # typed protocol model (§III.B)
+    │   └── src/
+    │       ├── room_version.rs # supported room versions 1–12
+    │       ├── error.rs        # Matrix CS error model (M_*)
+    │       ├── events.rs       # core m.room.* event types
+    │       └── pdu.rs          # the PDU envelope (auth/depth/state)
     └── gm-obs/           # observability (§VIII.A)
         └── src/
             ├── metrics.rs    # Prometheus-compatible counters/gauges
@@ -121,9 +127,9 @@ metrics — the same loop the GaussInteract client renders.
 
 ## Remaining crates (spec §III.B)
 
-`gm-http` · `gm-api` · `gm-svc` · `gm-stateres` · `gm-fed` · `gm-e2ee` ·
-`gm-shard` — added as implemented (`gm-agent`, `gm-store`, `gm-util` and
-`gm-obs` are in place). `gm-store`'s **RocksDB** backend is real, behind the
+`gm-http` · `gm-svc` · `gm-stateres` · `gm-fed` · `gm-e2ee` ·
+`gm-shard` — added as implemented (`gm-agent`, `gm-store`, `gm-util`, `gm-api`
+and `gm-obs` are in place). `gm-store`'s **RocksDB** backend is real, behind the
 `rocksdb` feature (`cargo test -p gm-store --features rocksdb`; CI builds it via
 `--all-features`). The remaining live `gm-agent` wiring (Application Service
 registration for cross-signed agent identities, the MCP transport, and

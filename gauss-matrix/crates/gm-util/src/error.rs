@@ -14,6 +14,8 @@ pub enum GmError {
     InvalidUserId(String),
     /// A string was not a valid Matrix room identifier (`!opaque:server`).
     InvalidRoomId(String),
+    /// A string was not a valid Matrix event identifier (`$opaque`).
+    InvalidEventId(String),
 }
 
 impl fmt::Display for GmError {
@@ -21,6 +23,7 @@ impl fmt::Display for GmError {
         match self {
             GmError::InvalidUserId(s) => write!(f, "invalid user id: {s:?}"),
             GmError::InvalidRoomId(s) => write!(f, "invalid room id: {s:?}"),
+            GmError::InvalidEventId(s) => write!(f, "invalid event id: {s:?}"),
         }
     }
 }

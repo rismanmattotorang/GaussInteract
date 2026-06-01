@@ -16,4 +16,4 @@ pub mod error;
 pub mod ids;
 
 pub use error::GmError;
-pub use ids::{AgentId, RoomId, UserId};
+pub use ids::{AgentId, EventId, RoomId, UserId};

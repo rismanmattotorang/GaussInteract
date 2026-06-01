@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "gm-api"
+description = "GaussMatrix typed protocol model: room versions, the Matrix CS error model, core event types, and the PDU envelope."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "gm_api"
+
+[dependencies]
+gm-util = { path = "../gm-util" }
+# The production model extends `ruma` for the full wire types + serde; this
+# scaffold pins the shapes the service core, state-res and federation reason
+# about (ids, room versions, errors, the PDU envelope) std-only.
+
+[dev-dependencies]

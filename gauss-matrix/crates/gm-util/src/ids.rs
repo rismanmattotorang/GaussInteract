@@ -97,6 +97,34 @@ impl fmt::Display for RoomId {
     }
 }
 
+/// A Matrix event identifier, e.g. `$abcdef...`. From room version 3 onward an
+/// event id is an opaque, sigil-prefixed reference hash with no `:server` part,
+/// so only the `$` sigil and non-empty body are required here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EventId(String);
+
+impl EventId {
+    /// Parse and validate an event id.
+    pub fn parse(s: impl Into<String>) -> Result<Self, GmError> {
+        let s = s.into();
+        match s.strip_prefix('$') {
+            Some(rest) if !rest.is_empty() => Ok(Self(s)),
+            _ => Err(GmError::InvalidEventId(s)),
+        }
+    }
+
+    /// The full id as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for EventId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// An AI agent's identity. An agent is provisioned as a Matrix user in a
 /// controlled namespace and cross-signed (spec §IV.A), so an `AgentId` is a
 /// [`UserId`] with an agent-specific type for clarity at API boundaries.
@@ -158,5 +186,11 @@ mod tests {
         ));
         assert!(RoomId::parse("not-a-room").is_err());
         assert!(AgentId::parse("nope").is_err());
+        assert!(EventId::parse("$abc").is_ok());
+        assert!(matches!(
+            EventId::parse("abc"),
+            Err(GmError::InvalidEventId(_))
+        ));
+        assert!(EventId::parse("$").is_err());
     }
 }

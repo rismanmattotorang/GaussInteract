@@ -125,6 +125,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gm-api"
+version = "0.0.1"
+dependencies = [
+ "gm-util",
+]
+
+[[package]]
 name = "gm-obs"
 version = "0.0.1"
 dependencies = [
