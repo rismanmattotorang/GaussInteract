@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "gm-fed"
+description = "GaussMatrix federation model: the Server-Server transaction envelope, EDUs, and partial-state join tracking."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "gm_fed"
+
+[dependencies]
+gm-api = { path = "../gm-api" }
+gm-util = { path = "../gm-util" }
+# The authenticated SS transport, backfill, and the per-destination sharded
+# sender (spec §III.E) drive these types; signature verification uses gm-e2ee.
+
+[dev-dependencies]

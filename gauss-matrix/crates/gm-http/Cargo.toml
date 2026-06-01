@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "gm-http"
+description = "GaussMatrix ingress surface: supported spec versions and the CS/SS/AS endpoint set the homeserver serves."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "gm_http"
+
+[dependencies]
+gm-api = { path = "../gm-api" }
+# The live ingress (axum/hyper, async) terminates TLS and routes each request to
+# the service core (spec §III.B); this crate pins the surface it must expose.
+
+[dev-dependencies]

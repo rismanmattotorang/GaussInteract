@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "gm-svc"
+description = "GaussMatrix service core: room timeline persistence and current-state tracking over the pluggable store."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "gm_svc"
+
+[dependencies]
+gm-api = { path = "../gm-api" }
+gm-stateres = { path = "../gm-stateres" }
+gm-store = { path = "../gm-store" }
+gm-util = { path = "../gm-util" }
+# Sync, devices, push and account-data services build on this core; the live
+# CS/SS handlers (gm-http) and federation (gm-fed) drive it.
+
+[dev-dependencies]

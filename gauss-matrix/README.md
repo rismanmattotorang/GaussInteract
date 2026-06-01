@@ -59,6 +59,16 @@ gauss-matrix/
     │       └── pdu.rs          # the PDU envelope (auth/depth/state)
     ├── gm-stateres/      # state-resolution core (§III.D)
     │   └── src/lib.rs        # conflicted/unconflicted partition + deterministic resolve
+    ├── gm-svc/           # service core: rooms, timeline, current state (§III.B)
+    │   └── src/              # RoomService over the store + a PDU codec
+    ├── gm-shard/         # consistent-hash room placement (§III.F)
+    │   └── src/lib.rs        # Placement ring with minimal-disruption rebalance
+    ├── gm-fed/           # federation model (§III.E)
+    │   └── src/lib.rs        # Transaction/EDU envelopes + partial-state joins
+    ├── gm-e2ee/          # E2EE key relay (§VI.B)
+    │   └── src/lib.rs        # device/cross-signing/key-backup envelopes (no crypto)
+    ├── gm-http/          # ingress surface (§III.B)
+    │   └── src/lib.rs        # supported spec versions + CS/SS/AS endpoint set
     └── gm-obs/           # observability (§VIII.A)
         └── src/
             ├── metrics.rs    # Prometheus-compatible counters/gauges
@@ -127,17 +137,21 @@ review-then-approve / forbidden / unmanaged tool calls, then verify the
 tamper-evident audit chain, stream it to a SIEM, and assert the Prometheus
 metrics — the same loop the GaussInteract client renders.
 
-## Remaining crates (spec §III.B)
+## Crate status (spec §III.B)
 
-`gm-http` · `gm-svc` · `gm-fed` · `gm-e2ee` · `gm-shard` — added as implemented
-(`gm-agent`, `gm-store`, `gm-util`, `gm-api`, `gm-stateres` and `gm-obs` are in
-place). `gm-store`'s **RocksDB** backend is real, behind the
-`rocksdb` feature (`cargo test -p gm-store --features rocksdb`; CI builds it via
-`--all-features`). The remaining live `gm-agent` wiring (Application Service
-registration for cross-signed agent identities, the MCP transport, and
-E2EE-aware mediation via `gm-e2ee`) lands behind the `mcp` feature; the
-distributed-KV `gm-store` backend (sharded profile) and `gm-obs`'s Prometheus
-HTTP exporter + OpenTelemetry traces land behind their own features.
+All **eleven** workspace crates are now scaffolded and tested: `gm-util`,
+`gm-api`, `gm-store`, `gm-stateres`, `gm-svc`, `gm-shard`, `gm-fed`, `gm-e2ee`,
+`gm-http`, `gm-obs`, and `gm-agent`. `gm-store`'s **RocksDB** backend is real,
+behind the `rocksdb` feature (`cargo test -p gm-store --features rocksdb`; CI
+builds it via `--all-features`).
+
+What remains is depth, not breadth — promoting scaffolds to live behaviour: the
+`gm-agent` runtime wiring (Application Service registration, the MCP transport,
+E2EE-aware mediation) behind the `mcp` feature; the async ingress (`gm-http` over
+axum/hyper) and authenticated federation transport (`gm-fed`); the full
+state-resolution v2 ordering on top of `gm-stateres`; the distributed-KV
+`gm-store` backend (sharded profile); and `gm-obs`'s Prometheus HTTP exporter +
+OpenTelemetry traces. Each is tracked in [`../ROADMAP.md`](../ROADMAP.md).
 
 `gm-obs` (§VIII.A) turns the durable audit log into structured records and
 streams them to a pluggable SIEM sink (`stream_audit` → newline-delimited JSON),
