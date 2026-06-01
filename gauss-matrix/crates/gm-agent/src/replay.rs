@@ -29,6 +29,8 @@ pub enum DenyReason {
     DailyCallBudget,
     /// The per-day token budget was exhausted.
     TokenBudget,
+    /// A declarative policy rule denied the call.
+    Policy,
     /// A human denied a queued review-class call.
     Human,
 }
@@ -131,6 +133,8 @@ fn classify(event: &str) -> StepKind {
         StepKind::Denied(DenyReason::DailyCallBudget)
     } else if event.starts_with("token_budget_exceeded") {
         StepKind::Denied(DenyReason::TokenBudget)
+    } else if event.starts_with("policy_denied") {
+        StepKind::Denied(DenyReason::Policy)
     } else if event.starts_with("denied_by ") {
         StepKind::Denied(DenyReason::Human)
     } else if event.starts_with("approved_by ") {

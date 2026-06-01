@@ -23,6 +23,9 @@ pub const TYPE_TOOL_RESULT: &str = "m.gauss.agent.tool_result";
 pub const TYPE_APPROVAL: &str = "m.gauss.agent.approval";
 /// `m.gauss.agent.capability` — an agent's capability grant (room state, §IV.C).
 pub const TYPE_CAPABILITY: &str = "m.gauss.agent.capability";
+/// `m.gauss.agent.policy` — a declarative policy set refining grants (room
+/// state, §IV.C): allow/deny/require-review rules evaluated per tool call.
+pub const TYPE_POLICY: &str = "m.gauss.agent.policy";
 
 /// A JSON-ish content value. Kept minimal (no serde dependency yet) but
 /// sufficient to model the strings, booleans, numbers and lists the agent

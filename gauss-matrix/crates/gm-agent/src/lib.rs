@@ -52,6 +52,7 @@ pub mod catalog;
 pub mod clock;
 pub mod events;
 pub mod mcp;
+pub mod policy;
 pub mod replay;
 pub mod resources;
 
@@ -61,6 +62,7 @@ use crate::catalog::{DiscoverableTool, ToolCatalog};
 use crate::clock::{Clock, SystemClock};
 use crate::events::ReflectedEvent;
 use crate::mcp::{ToolCall, ToolExecutor};
+use crate::policy::{Effect, PolicySet};
 use crate::resources::{
     render_timeline, room_from_uri, room_resource_uri, McpResource, ResourceContents, RoomContext,
 };
@@ -451,6 +453,58 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
         // Identifiers were validated when the ToolCall was constructed
         // (gm_util AgentId/RoomId), so mediation can trust them.
         let class = grant.classify(&call.tool, &call.room);
+        self.mediate(grant, call, class, executor)
+    }
+
+    /// Mediate a tool call against an agent's grant *and* a declarative
+    /// [`PolicySet`] (spec §IV.C). The grant fixes the base classification; the
+    /// policy may only *tighten* it — denying the call (audited `policy_denied`,
+    /// counted `gm_agent_actions_total{outcome="denied_policy"}`) or forcing an
+    /// otherwise-`auto` call through human review. A tool the grant forbids is
+    /// still refused by scope regardless of what the policy says.
+    pub fn handle_with_policy<E: ToolExecutor>(
+        &mut self,
+        grant: &CapabilityGrant,
+        policy: &PolicySet,
+        call: ToolCall,
+        executor: &mut E,
+    ) -> Outcome {
+        let base = grant.classify(&call.tool, &call.room);
+        // A grant-forbidden tool never reaches policy evaluation.
+        if base == ActionClass::Forbidden {
+            return self.mediate(grant, call, ActionClass::Forbidden, executor);
+        }
+        match policy.evaluate(&call.tool, call.room.as_str(), &call.args_summary) {
+            Effect::Deny => {
+                audit::append(
+                    &mut self.store,
+                    call.agent.as_str(),
+                    &format!("policy_denied: {} in {}", call.tool, call.room),
+                );
+                self.record_outcome("denied_policy");
+                Outcome::Denied {
+                    reason: format!("{} denied by policy in {}", call.tool, call.room),
+                    events: Vec::new(),
+                }
+            }
+            effect => {
+                let class = crate::policy::refine(base, effect);
+                self.mediate(grant, call, class, executor)
+            }
+        }
+    }
+
+    /// The shared mediation core: enforce the rate and daily call/token budgets
+    /// for `class`, then auto-execute, queue for human review, or refuse by
+    /// scope. Both [`Self::handle`] and [`Self::handle_with_policy`] funnel
+    /// through here with the (possibly policy-refined) class they computed.
+    fn mediate<E: ToolExecutor>(
+        &mut self,
+        grant: &CapabilityGrant,
+        call: ToolCall,
+        class: ActionClass,
+        executor: &mut E,
+    ) -> Outcome {
         if class == ActionClass::Forbidden {
             audit::append(
                 &mut self.store,
@@ -1035,6 +1089,80 @@ mod tests {
                 gw.handle(&grant, call("search"), &mut exec),
                 Outcome::Executed { .. }
             ));
+        }
+    }
+
+    #[test]
+    fn policy_can_downgrade_auto_to_review() {
+        use crate::policy::{Effect, PolicyRule, PolicySet};
+        // search is auto in the grant, but policy forces review when the args
+        // mention an external address.
+        let policy = PolicySet::allow_by_default().with_rule(
+            PolicyRule::new(Effect::RequireReview)
+                .for_tool("search")
+                .when_args_contain("@external"),
+        );
+        let mut gw = AgentGateway::new();
+        let mut exec = EchoExecutor;
+
+        // Benign args: policy doesn't match, auto-executes.
+        let benign = ToolCall::parse(AGENT, ROOM, "search", "q=weather").unwrap();
+        assert!(matches!(
+            gw.handle_with_policy(&grant(), &policy, benign, &mut exec),
+            Outcome::Executed { .. }
+        ));
+        // Sensitive args: policy forces human review.
+        let sensitive = ToolCall::parse(AGENT, ROOM, "search", "q=@external").unwrap();
+        assert!(matches!(
+            gw.handle_with_policy(&grant(), &policy, sensitive, &mut exec),
+            Outcome::AwaitingApproval { .. }
+        ));
+        assert_eq!(gw.verify_audit(), Ok(()));
+    }
+
+    #[test]
+    fn policy_can_deny_a_call_the_grant_would_allow() {
+        use crate::policy::{Effect, PolicyRule, PolicySet};
+        use crate::replay::{DenyReason, StepKind};
+        let policy = PolicySet::allow_by_default()
+            .with_rule(PolicyRule::new(Effect::Deny).for_tool("search"));
+        let mut gw = AgentGateway::new();
+        let mut exec = EchoExecutor;
+
+        match gw.handle_with_policy(&grant(), &policy, call("search"), &mut exec) {
+            Outcome::Denied { reason, events } => {
+                assert!(reason.contains("denied by policy"));
+                assert!(events.is_empty());
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        assert_eq!(
+            gw.metrics()
+                .counter("gm_agent_actions_total", &[("outcome", "denied_policy")]),
+            1
+        );
+        // The policy denial is replayable with its own reason.
+        let session = gw.replay_session(AGENT);
+        assert!(session
+            .steps
+            .iter()
+            .any(|s| s.kind == StepKind::Denied(DenyReason::Policy)));
+        assert_eq!(gw.verify_audit(), Ok(()));
+    }
+
+    #[test]
+    fn policy_cannot_widen_a_grant_forbidden_tool() {
+        use crate::policy::{Effect, PolicyRule, PolicySet};
+        // Even an explicit allow rule cannot admit a tool the grant forbids.
+        let policy = PolicySet::new(
+            Effect::Allow,
+            vec![PolicyRule::new(Effect::Allow).for_tool("rm_rf")],
+        );
+        let mut gw = AgentGateway::new();
+        let mut exec = EchoExecutor;
+        match gw.handle_with_policy(&grant(), &policy, call("rm_rf"), &mut exec) {
+            Outcome::Denied { events, .. } => assert!(events.is_empty()),
+            other => panic!("expected Denied, got {other:?}"),
         }
     }
 

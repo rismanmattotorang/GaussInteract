@@ -79,6 +79,7 @@ the incumbents can't enter.
 | Human-in-the-loop approval | ✅ | ✗ | ✗ | ✗ |
 | Per-agent rate + daily call budgets | ✅ | ✗ | ✗ | ✗ |
 | Per-agent **token/cost budgets** (FinOps) | ✅ | ✗ | ✗ | ✗ |
+| **Declarative policy engine** (conditional rules) | ✅ | ✗ | ✗ | ✗ |
 | Tamper-evident audit → SIEM | ✅ | partial | partial | partial |
 | **Replayable agent sessions** (incident review) | ✅ | ✗ | ✗ | ✗ |
 | Mature chat UX / ecosystem | ◦ (catch-up) | ✅ | ✅ | ✅ |
@@ -102,12 +103,14 @@ the incumbents can't enter.
    flagged with chain integrity.
 10. **Resolved-state cache** (§III.D) — ✅ memoised conflict resolution in
     `gm-stateres::CachedResolver`.
+11. **Declarative policy engine** — ✅ **delivered this pass** (`gm-agent::policy`):
+    first-match-wins allow/require-review/deny rules conditioned on tool, room
+    and argument substring, versioned as `m.gauss.agent.policy` room state, that
+    can only *tighten* a grant (never widen it).
 
 ### Next moat increments (queued — these widen the lead):
-11. **Multi-agent orchestration** — multiple agents in a room with inter-agent
+12. **Multi-agent orchestration** — multiple agents in a room with inter-agent
     tool mediation and per-agent attribution in the audit chain.
-12. **Declarative policy engine** — grants expressed as policy (allow/deny rules,
-    conditions) beyond per-tool classification; versioned as room state.
 13. **Agent memory/context rooms** — scoped, durable agent context with the same
     E2EE and audit guarantees.
 
@@ -119,23 +122,25 @@ the incumbents can't enter.
 
 ## What this pass executed
 
-**Replayable agent sessions (#9, `gm-agent::replay`)** — incident review built on
-the existing tamper-evident audit chain. `replay_session(agent)` /
-`replay_all()` reconstruct, per agent, the ordered sequence of structured
-[`StepKind`] steps (denials with reason, auto-allows, approval requests, human
-approvals, executions with their token cost, resource reads, discovery,
-unmanaged-identity rejections) — each tagged with its global chain sequence so
-multiple agents' steps can be re-interleaved into real time. Critically, every
-replay carries `chain_intact`: a reconstruction over a *tampered* chain is
-flagged, not silently trusted. Convenience summaries (`executions()`,
-`denials()`, `total_tokens()`) recover the FinOps and outcome figures straight
-from the record. A gateway-driven test proves the classifier matches the audit
-vocabulary the gateway actually emits.
+**Declarative policy engine (#11, `gm-agent::policy`)** — conditional governance
+layered over the capability grant. A `PolicySet` is a first-match-wins firewall
+of `allow` / `require-review` / `deny` rules, each conditioned on the tool, the
+room, and/or a substring of the call's arguments, with a default effect. It is
+room state (`m.gauss.agent.policy`) — visible, versioned, federated, revocable —
+and round-trips through event content. The new `AgentGateway::handle_with_policy`
+funnels through the same mediation core as `handle` (extracted into a shared
+`mediate`), consulting the policy *after* the grant: critically, `refine()`
+guarantees policy can only **tighten** — a grant-forbidden tool stays forbidden,
+an `auto` tool can be forced to `review` or denied, but a `review` tool is never
+widened to `auto` and a withheld tool is never admitted. Policy denials are
+audited (`policy_denied`), counted (`gm_agent_actions_total{outcome="denied_policy"}`)
+and replayable (new `DenyReason::Policy`).
 
-(Earlier in the same sequence: cost/token accounting (#8) and the resolved-state
-cache (#10) shipped in PR #6.)
+(Earlier in the same sequence, shipped to `main`: cost/token accounting (#8),
+the resolved-state cache (#10) in PR #6, and replayable agent sessions (#9) in
+PR #7.)
 
-Verified: **83 workspace tests**, `clippy -D warnings` clean, `rustfmt` clean.
+Verified: **92 workspace tests**, `clippy -D warnings` clean, `rustfmt` clean.
 
 ## How we'll know we've won
 
