@@ -55,6 +55,11 @@ impl Store for RocksStore {
         let _ = self.db.put(Self::composite(cf, key).as_bytes(), value);
     }
 
+    fn delete(&mut self, cf: &str, key: &str) {
+        // Best-effort, mirroring `put`: the Store contract is infallible.
+        let _ = self.db.delete(Self::composite(cf, key).as_bytes());
+    }
+
     fn get(&self, cf: &str, key: &str) -> Option<Vec<u8>> {
         self.db
             .get(Self::composite(cf, key).as_bytes())

@@ -60,6 +60,8 @@ pub enum StepKind {
     },
     /// A tool/resource discovery (`tools/list` or `resources/list`).
     Discovery,
+    /// A scoped agent-memory operation (store / recall / forget).
+    Memory,
     /// The call was delegated to this agent by another (multi-agent
     /// orchestration); carries the delegating principal.
     Delegated {
@@ -167,6 +169,10 @@ fn classify(event: &str) -> StepKind {
         StepKind::ResourceAccess { granted: false }
     } else if event.starts_with("resources_listed") || event.starts_with("tools_listed") {
         StepKind::Discovery
+    } else if event.starts_with("memory_denied") {
+        StepKind::Denied(DenyReason::Scope)
+    } else if event.starts_with("memory_") {
+        StepKind::Memory
     } else if event.starts_with("unmanaged_agent") {
         StepKind::UnmanagedAgent
     } else {

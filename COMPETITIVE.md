@@ -17,7 +17,7 @@ There are two different gaps, and conflating them is the trap:
 1. **Table-stakes gap (we are behind).** Slack, Microsoft Teams, Discord,
    Mattermost and the Element Server Suite are shipping products with years of
    polish. GaussMatrix is, today, a **tested architectural scaffold** (11 Rust
-   crates, 72 tests, clippy/fmt clean) — not yet a deployable homeserver, and
+   crates, 104 tests, clippy/fmt clean) — not yet a deployable homeserver, and
    the client is a rebranded FluffyChat base mid-migration to a Rust core. We
    close this by **execution**, tracked in [`ROADMAP.md`](./ROADMAP.md).
 2. **The moat (we leap ahead).** *Agentic AI as a first-class, governed,
@@ -81,6 +81,7 @@ the incumbents can't enter.
 | Per-agent **token/cost budgets** (FinOps) | ✅ | ✗ | ✗ | ✗ |
 | **Declarative policy engine** (conditional rules) | ✅ | ✗ | ✗ | ✗ |
 | **Multi-agent orchestration** (per-agent grants + delegation) | ✅ | ✗ | ✗ | ✗ |
+| **Scoped, durable agent memory** (audited) | ✅ | ✗ | ✗ | ✗ |
 | Tamper-evident audit → SIEM | ✅ | partial | partial | partial |
 | **Replayable agent sessions** (incident review) | ✅ | ✗ | ✗ | ✗ |
 | Mature chat UX / ecosystem | ◦ (catch-up) | ✅ | ✅ | ✅ |
@@ -108,14 +109,19 @@ the incumbents can't enter.
     allow/require-review/deny rules conditioned on tool, room and argument
     substring, versioned as `m.gauss.agent.policy` room state, that can only
     *tighten* a grant (never widen it).
-12. **Multi-agent orchestration** — ✅ **delivered this pass** (`gm-agent::roster`):
-    per-room roster of agents, each under its own grant; gateway dispatch by
-    caller (`handle_in_room`) and attributed delegation (`handle_delegated`) that
+12. **Multi-agent orchestration** — ✅ (`gm-agent::roster`): per-room roster of
+    agents, each under its own grant; gateway dispatch by caller
+    (`handle_in_room`) and attributed delegation (`handle_delegated`) that
     mediates under the worker's grant and cannot launder privilege.
+13. **Scoped, durable agent memory** — ✅ **delivered this pass**
+    (`gm-agent::memory`): room-scoped, durable, fully audited agent context that
+    cannot escape the capability grant.
 
 ### Next moat increments (queued — these widen the lead):
-13. **Agent memory/context rooms** — scoped, durable agent context with the same
-    E2EE and audit guarantees.
+- The agentic moat #1–#13 is now delivered end-to-end as a tested scaffold.
+  The remaining work is to run it over a **live homeserver** (Phase 1–2) and
+  bind agent memory/mediation to **E2EE** via `gm-e2ee` (the `mcp` feature),
+  tracked in [`ROADMAP.md`](./ROADMAP.md).
 
 ### Catch-up (table-stakes — via ROADMAP, not a differentiator):
 - Phase 1–2: `gauss-core` (matrix-rust-sdk + vodozemac + uniffi); the live
@@ -125,25 +131,28 @@ the incumbents can't enter.
 
 ## What this pass executed
 
-**Multi-agent orchestration (#12, `gm-agent::roster`)** — a single room can now
-host many agents at once, each a distinct principal under its **own** capability
-grant. An `AgentRoster` is the per-room registry of agents→grants;
-`AgentGateway::handle_in_room` dispatches an inbound call to the calling agent's
-grant (a caller not on the roster has no grant and is refused, audited
-`unknown_agent`). On top of independent agents, **delegation**
-(`handle_delegated`) lets one agent ask another to act: the delegated call is
-mediated under the **worker's** grant — so delegation cannot launder privilege
-(delegating a tool the worker lacks is still refused) — and the delegating
-principal is recorded (`delegated_by …`) so the audit trail and a replay show the
-full orchestrator→worker chain (new `replay::StepKind::Delegated { by }`).
-`discoverable_tools` gives an orchestrator the per-agent, grant-scoped view of
-who can do what.
+**Scoped, durable agent memory (#13, `gm-agent::memory`)** — an agent can now
+keep context that outlives a single tool call (notes, summaries, task state)
+with the *same* guarantees as everything else it touches. Memory is **scoped to
+the rooms the grant permits** (`remember` / `recall` / `recall_all` / `forget`
+all refuse — and audit `memory_denied` — a room outside the grant, so memory can
+never become a side channel that escapes capability scope), it is **durable**
+(persisted in the new `gm_store::cf::AGENT_MEMORY` column family), and every
+read, write and deletion is **audited** on the tamper-evident chain and counted
+(`gm_agent_memory_ops_total`). Keys are namespaced `{agent}␟{room}␟{key}`. The
+`Store` trait gained a `delete` method (implemented for the in-memory and
+RocksDB backends) to back `forget`. Memory operations are classified in replay
+(`replay::StepKind::Memory`).
+
+(Earlier in the same sequence, shipped to `main`: cost/token accounting (#8) and
+the resolved-state cache (#10) in PR #6, replayable sessions (#9) in PR #7, the
+policy engine (#11) in PR #8, and multi-agent orchestration (#12) in PR #9.)
 
 (Earlier in the same sequence, shipped to `main`: cost/token accounting (#8) and
 the resolved-state cache (#10) in PR #6, replayable agent sessions (#9) in PR #7,
 and the declarative policy engine (#11) in PR #8.)
 
-Verified: **98 workspace tests**, `clippy -D warnings` clean, `rustfmt` clean.
+Verified: **104 workspace tests**, `clippy -D warnings` clean, `rustfmt` clean.
 
 ## How we'll know we've won
 

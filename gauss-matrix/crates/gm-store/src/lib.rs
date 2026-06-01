@@ -38,6 +38,8 @@ pub mod cf {
     pub const CAPABILITY_GRANTS: &str = "capability_grants";
     /// The hash-chained agent audit log (§IV.D).
     pub const AUDIT_LOG: &str = "audit_log";
+    /// Scoped, durable agent memory/context (§IV).
+    pub const AGENT_MEMORY: &str = "agent_memory";
 }
 
 /// A backend-agnostic, column-family keyed store.
@@ -50,6 +52,9 @@ pub mod cf {
 pub trait Store {
     /// Insert or overwrite `key` in column family `cf`.
     fn put(&mut self, cf: &str, key: &str, value: &[u8]);
+
+    /// Remove `key` from column family `cf` (a no-op if absent).
+    fn delete(&mut self, cf: &str, key: &str);
 
     /// Fetch `key` from column family `cf`, if present.
     fn get(&self, cf: &str, key: &str) -> Option<Vec<u8>>;
