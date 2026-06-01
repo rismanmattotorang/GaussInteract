@@ -52,6 +52,7 @@ pub mod catalog;
 pub mod clock;
 pub mod events;
 pub mod mcp;
+pub mod replay;
 pub mod resources;
 
 use crate::appservice::AppserviceRegistration;
@@ -225,6 +226,19 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
     /// the first corrupted entry).
     pub fn verify_audit(&self) -> Result<(), usize> {
         audit::verify(&self.store)
+    }
+
+    /// Reconstruct one agent's session from the audit chain for incident review
+    /// (the audit moat): the ordered, structured steps that agent took, flagged
+    /// with whether the underlying chain verified intact.
+    pub fn replay_session(&self, agent: &str) -> replay::SessionReplay {
+        replay::replay_session(&self.store, agent)
+    }
+
+    /// Reconstruct every agent's session from the audit chain — one
+    /// [`replay::SessionReplay`] per agent, in first-appearance order.
+    pub fn replay_all(&self) -> Vec<replay::SessionReplay> {
+        replay::replay_all(&self.store)
     }
 
     /// Stream this gateway's durable audit log to a SIEM sink as structured
@@ -1022,6 +1036,41 @@ mod tests {
                 Outcome::Executed { .. }
             ));
         }
+    }
+
+    #[test]
+    fn replay_reconstructs_a_real_gateway_session() {
+        use crate::replay::{DenyReason, StepKind};
+        let mut gw = AgentGateway::new();
+        let mut exec = EchoExecutor;
+
+        // search (auto) executes; rm_rf is denied by scope; send_email queues
+        // for review and is then approved + executed.
+        gw.handle(&grant(), call("search"), &mut exec);
+        gw.handle(&grant(), call("rm_rf"), &mut exec);
+        let Outcome::AwaitingApproval { request_id, .. } =
+            gw.handle(&grant(), call("send_email"), &mut exec)
+        else {
+            panic!("expected AwaitingApproval");
+        };
+        gw.resolve(request_id, true, "@boss:gaussian.tech", &mut exec)
+            .expect("known request");
+
+        let session = gw.replay_session(AGENT);
+        assert!(session.chain_intact);
+        // The classifier matches the gateway's actual audit vocabulary.
+        assert_eq!(session.executions(), 2); // search + send_email
+        assert_eq!(session.denials(), 1); // rm_rf scope denial
+                                          // EchoExecutor meters len(tool)+len("args"): search=6+4=10, send_email=10+4=14.
+        assert_eq!(session.total_tokens(), 24);
+        assert!(session
+            .steps
+            .iter()
+            .any(|s| s.kind == StepKind::Denied(DenyReason::Scope)));
+        assert!(session.steps.iter().any(|s| s.kind == StepKind::Approved));
+
+        // The whole-deployment view groups by agent (here, just the one).
+        assert_eq!(gw.replay_all().len(), 1);
     }
 
     #[test]

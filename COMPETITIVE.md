@@ -80,6 +80,7 @@ the incumbents can't enter.
 | Per-agent rate + daily call budgets | ✅ | ✗ | ✗ | ✗ |
 | Per-agent **token/cost budgets** (FinOps) | ✅ | ✗ | ✗ | ✗ |
 | Tamper-evident audit → SIEM | ✅ | partial | partial | partial |
+| **Replayable agent sessions** (incident review) | ✅ | ✗ | ✗ | ✗ |
 | Mature chat UX / ecosystem | ◦ (catch-up) | ✅ | ✅ | ✅ |
 
 ## The plan — invest in the moat, execute the catch-up
@@ -96,17 +97,19 @@ the incumbents can't enter.
    (`CapabilityGrant.daily_token_budget`, day-rolling token ledger, denial +
    `gm_agent_tokens_total` metric; client mirror parses and renders it)
 
-### Next moat increments (queued — these widen the lead):
-9. **Multi-agent orchestration** — multiple agents in a room with inter-agent
-   tool mediation and per-agent attribution in the audit chain.
-10. **Declarative policy engine** — grants expressed as policy (allow/deny rules,
-    conditions) beyond per-tool classification; versioned as room state.
-11. **Agent memory/context rooms** — scoped, durable agent context with the same
-    E2EE and audit guarantees.
-12. **Replayable agent sessions** — reconstruct exactly what an agent saw/did
-    from the audit chain (incident review).
-13. **Resolved-state cache** (§III.D) — ✅ memoised conflict resolution in
+9. **Replayable agent sessions** — ✅ **delivered this pass** (`gm-agent::replay`):
+   reconstruct exactly what an agent did from the audit chain (incident review),
+   flagged with chain integrity.
+10. **Resolved-state cache** (§III.D) — ✅ memoised conflict resolution in
     `gm-stateres::CachedResolver`.
+
+### Next moat increments (queued — these widen the lead):
+11. **Multi-agent orchestration** — multiple agents in a room with inter-agent
+    tool mediation and per-agent attribution in the audit chain.
+12. **Declarative policy engine** — grants expressed as policy (allow/deny rules,
+    conditions) beyond per-tool classification; versioned as room state.
+13. **Agent memory/context rooms** — scoped, durable agent context with the same
+    E2EE and audit guarantees.
 
 ### Catch-up (table-stakes — via ROADMAP, not a differentiator):
 - Phase 1–2: `gauss-core` (matrix-rust-sdk + vodozemac + uniffi); the live
@@ -116,26 +119,23 @@ the incumbents can't enter.
 
 ## What this pass executed
 
-Two spec-aligned increments, std-only and tested:
+**Replayable agent sessions (#9, `gm-agent::replay`)** — incident review built on
+the existing tamper-evident audit chain. `replay_session(agent)` /
+`replay_all()` reconstruct, per agent, the ordered sequence of structured
+[`StepKind`] steps (denials with reason, auto-allows, approval requests, human
+approvals, executions with their token cost, resource reads, discovery,
+unmanaged-identity rejections) — each tagged with its global chain sequence so
+multiple agents' steps can be re-interleaved into real time. Critically, every
+replay carries `chain_intact`: a reconstruction over a *tampered* chain is
+flagged, not silently trusted. Convenience summaries (`executions()`,
+`denials()`, `total_tokens()`) recover the FinOps and outcome figures straight
+from the record. A gateway-driven test proves the classifier matches the audit
+vocabulary the gateway actually emits.
 
-- **Cost/token accounting (#8, `gm-agent`)** — `ToolOutcome.tokens` meters each
-  execution; `CapabilityGrant.daily_token_budget` (round-tripped through
-  `m.gauss.agent.capability` content, optional for backward compat) caps daily
-  token spend. A per-agent day-rolling ledger now tracks calls *and* tokens
-  together; `handle()` denies a call whose agent has already spent its token
-  budget (audited `token_budget_exceeded`, counted
-  `gm_agent_actions_total{outcome="token_budget_exceeded"}`), and consumed tokens
-  are accounted to `gm_agent_tokens_total{agent}` on every execution (auto and
-  post-approval). The GaussInteract client mirror
-  (`lib/utils/gauss_core/gauss_core.dart`) parses both daily budgets and the
-  capability view renders them.
-- **Resolved-state cache (§III.D, `gm-stateres`)** — `CachedResolver` memoises
-  conflict resolution keyed by the (immutable) set of conflicting event ids, so
-  recurrent conflicts are not recomputed; unconflicted slots always merge live.
-  Exposes `hits`/`misses`/`cached_entries`, and is verified to match the uncached
-  path.
+(Earlier in the same sequence: cost/token accounting (#8) and the resolved-state
+cache (#10) shipped in PR #6.)
 
-Verified: **77 workspace tests**, `clippy -D warnings` clean, `rustfmt` clean.
+Verified: **83 workspace tests**, `clippy -D warnings` clean, `rustfmt` clean.
 
 ## How we'll know we've won
 
