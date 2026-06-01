@@ -40,6 +40,8 @@ pub mod cf {
     pub const AUDIT_LOG: &str = "audit_log";
     /// Scoped, durable agent memory/context (§IV).
     pub const AGENT_MEMORY: &str = "agent_memory";
+    /// Client access tokens → the user/device they authenticate (§II.B).
+    pub const ACCESS_TOKENS: &str = "access_tokens";
 }
 
 /// A backend-agnostic, column-family keyed store.

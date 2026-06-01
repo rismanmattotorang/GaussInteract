@@ -18,6 +18,9 @@
 #![deny(rust_2018_idioms)]
 
 mod codec;
+pub mod session;
+
+pub use session::SessionStore;
 
 use gm_api::Pdu;
 use gm_stateres::StateMap;

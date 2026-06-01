@@ -16,6 +16,7 @@ name = "gm_http"
 
 [dependencies]
 gm-api = { path = "../gm-api" }
+gm-util = { path = "../gm-util" }
 # The live ingress (axum/hyper, async) terminates TLS and routes each request to
 # the service core (spec §III.B); this crate pins the surface it must expose.
 
