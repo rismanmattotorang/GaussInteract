@@ -60,6 +60,12 @@ pub enum StepKind {
     },
     /// A tool/resource discovery (`tools/list` or `resources/list`).
     Discovery,
+    /// The call was delegated to this agent by another (multi-agent
+    /// orchestration); carries the delegating principal.
+    Delegated {
+        /// The agent that delegated the call.
+        by: String,
+    },
     /// A call from an identity outside the Application Service namespace.
     UnmanagedAgent,
     /// An entry the replay does not specifically classify.
@@ -139,6 +145,11 @@ fn classify(event: &str) -> StepKind {
         StepKind::Denied(DenyReason::Human)
     } else if event.starts_with("approved_by ") {
         StepKind::Approved
+    } else if let Some(rest) = event.strip_prefix("delegated_by ") {
+        // "delegated_by <orchestrator>: <tool>" -> capture the orchestrator.
+        StepKind::Delegated {
+            by: rest.split(": ").next().unwrap_or("").to_owned(),
+        }
     } else if event.starts_with("auto_allowed") {
         StepKind::AutoAllowed
     } else if event.starts_with("approval_requested") {

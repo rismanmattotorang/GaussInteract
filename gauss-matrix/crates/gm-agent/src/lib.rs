@@ -55,6 +55,7 @@ pub mod mcp;
 pub mod policy;
 pub mod replay;
 pub mod resources;
+pub mod roster;
 
 use crate::appservice::AppserviceRegistration;
 use crate::capability::{ActionClass, CapabilityGrant};
@@ -66,8 +67,10 @@ use crate::policy::{Effect, PolicySet};
 use crate::resources::{
     render_timeline, room_from_uri, room_resource_uri, McpResource, ResourceContents, RoomContext,
 };
+use crate::roster::AgentRoster;
 use gm_obs::Metrics;
 use gm_store::{audit, MemoryStore, Store};
+use gm_util::AgentId;
 use std::fmt;
 
 /// The rate-limit window: tool calls per agent are counted over this many
@@ -87,6 +90,8 @@ pub enum GatewayError {
     ResourceAccessDenied(String),
     /// The URI is not a resource this gateway exposes.
     UnknownResource(String),
+    /// The agent is not on the room's roster (no grant to mediate against).
+    UnknownAgent(String),
 }
 
 impl fmt::Display for GatewayError {
@@ -100,6 +105,9 @@ impl fmt::Display for GatewayError {
             }
             GatewayError::UnknownResource(uri) => {
                 write!(f, "unknown resource: {uri}")
+            }
+            GatewayError::UnknownAgent(agent) => {
+                write!(f, "agent not on the room roster: {agent}")
             }
         }
     }
@@ -454,6 +462,76 @@ impl<S: Store, C: Clock> AgentGateway<S, C> {
         // (gm_util AgentId/RoomId), so mediation can trust them.
         let class = grant.classify(&call.tool, &call.room);
         self.mediate(grant, call, class, executor)
+    }
+
+    /// Mediate a tool call in a multi-agent room, dispatching to the calling
+    /// agent's own grant on the [`AgentRoster`] (spec §IV). A call from an agent
+    /// that is not on the roster has no grant to mediate against and is refused
+    /// (and audited) — admitting one agent never lets an unlisted identity act.
+    pub fn handle_in_room<E: ToolExecutor>(
+        &mut self,
+        roster: &AgentRoster,
+        call: ToolCall,
+        executor: &mut E,
+    ) -> Result<Outcome, GatewayError> {
+        match roster.grant_for(&call.agent) {
+            Some(grant) => {
+                let class = grant.classify(&call.tool, &call.room);
+                Ok(self.mediate(grant, call, class, executor))
+            }
+            None => {
+                audit::append(
+                    &mut self.store,
+                    call.agent.as_str(),
+                    &format!("unknown_agent: {}", call.agent),
+                );
+                self.record_outcome("unknown_agent");
+                Err(GatewayError::UnknownAgent(call.agent.as_str().to_owned()))
+            }
+        }
+    }
+
+    /// Mediate a call one agent (`orchestrator`) delegates to another (the
+    /// `call`'s agent, the *worker*) in a multi-agent room (spec §IV).
+    ///
+    /// Delegation cannot launder privilege: the worker's call is mediated under
+    /// the **worker's own grant**, exactly as a direct call would be. The only
+    /// addition is attribution — the delegating principal is recorded in the
+    /// audit chain (`delegated_by …`), so the trail and a [`replay`] show the
+    /// full orchestrator→worker chain. Both principals must be on the roster.
+    pub fn handle_delegated<E: ToolExecutor>(
+        &mut self,
+        roster: &AgentRoster,
+        orchestrator: &AgentId,
+        call: ToolCall,
+        executor: &mut E,
+    ) -> Result<Outcome, GatewayError> {
+        if !roster.contains(orchestrator) {
+            audit::append(
+                &mut self.store,
+                orchestrator.as_str(),
+                &format!("unknown_agent: {orchestrator}"),
+            );
+            self.record_outcome("unknown_agent");
+            return Err(GatewayError::UnknownAgent(orchestrator.as_str().to_owned()));
+        }
+        let Some(grant) = roster.grant_for(&call.agent) else {
+            audit::append(
+                &mut self.store,
+                call.agent.as_str(),
+                &format!("unknown_agent: {}", call.agent),
+            );
+            self.record_outcome("unknown_agent");
+            return Err(GatewayError::UnknownAgent(call.agent.as_str().to_owned()));
+        };
+        // Attribute the delegation to the worker's session before mediating it.
+        audit::append(
+            &mut self.store,
+            call.agent.as_str(),
+            &format!("delegated_by {}: {}", orchestrator, call.tool),
+        );
+        let class = grant.classify(&call.tool, &call.room);
+        Ok(self.mediate(grant, call, class, executor))
     }
 
     /// Mediate a tool call against an agent's grant *and* a declarative
@@ -1090,6 +1168,119 @@ mod tests {
                 Outcome::Executed { .. }
             ));
         }
+    }
+
+    #[test]
+    fn roster_dispatches_each_call_to_its_own_agents_grant() {
+        use crate::roster::AgentRoster;
+        let room = RoomId::parse(ROOM).unwrap();
+        let searcher = AgentId::parse("@gauss_agent_searcher:gaussian.tech").unwrap();
+        let mailer = AgentId::parse("@gauss_agent_mailer:gaussian.tech").unwrap();
+        let roster = AgentRoster::new()
+            .admit(
+                CapabilityGrant::deny_all(searcher.clone())
+                    .allow_room(room.clone())
+                    .allow_tool("search", ActionClass::Auto),
+            )
+            .admit(
+                CapabilityGrant::deny_all(mailer.clone())
+                    .allow_room(room.clone())
+                    .allow_tool("send_email", ActionClass::Review),
+            );
+        let mut gw = AgentGateway::new();
+        let mut exec = EchoExecutor;
+
+        // The searcher's auto tool executes.
+        let c1 = ToolCall::new(searcher.clone(), room.clone(), "search", "q");
+        assert!(matches!(
+            gw.handle_in_room(&roster, c1, &mut exec).unwrap(),
+            Outcome::Executed { .. }
+        ));
+        // The mailer cannot search — it's not in *its* grant, so it's forbidden.
+        let c2 = ToolCall::new(mailer.clone(), room.clone(), "search", "q");
+        assert!(matches!(
+            gw.handle_in_room(&roster, c2, &mut exec).unwrap(),
+            Outcome::Denied { .. }
+        ));
+        // An agent absent from the roster has no grant and is refused.
+        let stranger = AgentId::parse("@gauss_agent_stranger:gaussian.tech").unwrap();
+        let c3 = ToolCall::new(stranger, room, "search", "q");
+        assert_eq!(
+            gw.handle_in_room(&roster, c3, &mut exec),
+            Err(GatewayError::UnknownAgent(
+                "@gauss_agent_stranger:gaussian.tech".to_owned()
+            ))
+        );
+        assert_eq!(gw.verify_audit(), Ok(()));
+    }
+
+    #[test]
+    fn delegation_mediates_under_the_worker_grant_and_attributes_the_chain() {
+        use crate::replay::StepKind;
+        use crate::roster::AgentRoster;
+        let room = RoomId::parse(ROOM).unwrap();
+        let orchestrator = AgentId::parse("@gauss_agent_orchestrator:gaussian.tech").unwrap();
+        let worker = AgentId::parse("@gauss_agent_worker:gaussian.tech").unwrap();
+        let roster = AgentRoster::new()
+            .admit(
+                CapabilityGrant::deny_all(orchestrator.clone())
+                    .allow_room(room.clone())
+                    .allow_tool("delegate", ActionClass::Auto),
+            )
+            .admit(
+                CapabilityGrant::deny_all(worker.clone())
+                    .allow_room(room.clone())
+                    .allow_tool("search", ActionClass::Auto),
+            );
+        let mut gw = AgentGateway::new();
+        let mut exec = EchoExecutor;
+
+        // The orchestrator delegates a search to the worker; it runs under the
+        // worker's grant.
+        let delegated = ToolCall::new(worker.clone(), room.clone(), "search", "q");
+        assert!(matches!(
+            gw.handle_delegated(&roster, &orchestrator, delegated, &mut exec)
+                .unwrap(),
+            Outcome::Executed { .. }
+        ));
+
+        // Delegation cannot launder privilege: delegating a tool the *worker*
+        // lacks is still forbidden, even though it is named here by the
+        // orchestrator.
+        let illicit = ToolCall::new(worker.clone(), room.clone(), "delegate", "x");
+        assert!(matches!(
+            gw.handle_delegated(&roster, &orchestrator, illicit, &mut exec)
+                .unwrap(),
+            Outcome::Denied { .. }
+        ));
+
+        // The worker's replay attributes the delegation to the orchestrator.
+        let session = gw.replay_session(worker.as_str());
+        assert!(session.steps.iter().any(|s| s.kind
+            == StepKind::Delegated {
+                by: "@gauss_agent_orchestrator:gaussian.tech".to_owned()
+            }));
+        assert_eq!(gw.verify_audit(), Ok(()));
+    }
+
+    #[test]
+    fn delegation_by_an_agent_outside_the_roster_is_refused() {
+        use crate::roster::AgentRoster;
+        let room = RoomId::parse(ROOM).unwrap();
+        let worker = AgentId::parse("@gauss_agent_worker:gaussian.tech").unwrap();
+        let roster = AgentRoster::new().admit(
+            CapabilityGrant::deny_all(worker.clone())
+                .allow_room(room.clone())
+                .allow_tool("search", ActionClass::Auto),
+        );
+        let mut gw = AgentGateway::new();
+        let mut exec = EchoExecutor;
+        let stranger = AgentId::parse("@gauss_agent_stranger:gaussian.tech").unwrap();
+        let call = ToolCall::new(worker, room, "search", "q");
+        assert!(matches!(
+            gw.handle_delegated(&roster, &stranger, call, &mut exec),
+            Err(GatewayError::UnknownAgent(_))
+        ));
     }
 
     #[test]
