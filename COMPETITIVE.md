@@ -80,6 +80,7 @@ the incumbents can't enter.
 | Per-agent rate + daily call budgets | ✅ | ✗ | ✗ | ✗ |
 | Per-agent **token/cost budgets** (FinOps) | ✅ | ✗ | ✗ | ✗ |
 | **Declarative policy engine** (conditional rules) | ✅ | ✗ | ✗ | ✗ |
+| **Multi-agent orchestration** (per-agent grants + delegation) | ✅ | ✗ | ✗ | ✗ |
 | Tamper-evident audit → SIEM | ✅ | partial | partial | partial |
 | **Replayable agent sessions** (incident review) | ✅ | ✗ | ✗ | ✗ |
 | Mature chat UX / ecosystem | ◦ (catch-up) | ✅ | ✅ | ✅ |
@@ -103,14 +104,16 @@ the incumbents can't enter.
    flagged with chain integrity.
 10. **Resolved-state cache** (§III.D) — ✅ memoised conflict resolution in
     `gm-stateres::CachedResolver`.
-11. **Declarative policy engine** — ✅ **delivered this pass** (`gm-agent::policy`):
-    first-match-wins allow/require-review/deny rules conditioned on tool, room
-    and argument substring, versioned as `m.gauss.agent.policy` room state, that
-    can only *tighten* a grant (never widen it).
+11. **Declarative policy engine** — ✅ (`gm-agent::policy`): first-match-wins
+    allow/require-review/deny rules conditioned on tool, room and argument
+    substring, versioned as `m.gauss.agent.policy` room state, that can only
+    *tighten* a grant (never widen it).
+12. **Multi-agent orchestration** — ✅ **delivered this pass** (`gm-agent::roster`):
+    per-room roster of agents, each under its own grant; gateway dispatch by
+    caller (`handle_in_room`) and attributed delegation (`handle_delegated`) that
+    mediates under the worker's grant and cannot launder privilege.
 
 ### Next moat increments (queued — these widen the lead):
-12. **Multi-agent orchestration** — multiple agents in a room with inter-agent
-    tool mediation and per-agent attribution in the audit chain.
 13. **Agent memory/context rooms** — scoped, durable agent context with the same
     E2EE and audit guarantees.
 
@@ -122,25 +125,25 @@ the incumbents can't enter.
 
 ## What this pass executed
 
-**Declarative policy engine (#11, `gm-agent::policy`)** — conditional governance
-layered over the capability grant. A `PolicySet` is a first-match-wins firewall
-of `allow` / `require-review` / `deny` rules, each conditioned on the tool, the
-room, and/or a substring of the call's arguments, with a default effect. It is
-room state (`m.gauss.agent.policy`) — visible, versioned, federated, revocable —
-and round-trips through event content. The new `AgentGateway::handle_with_policy`
-funnels through the same mediation core as `handle` (extracted into a shared
-`mediate`), consulting the policy *after* the grant: critically, `refine()`
-guarantees policy can only **tighten** — a grant-forbidden tool stays forbidden,
-an `auto` tool can be forced to `review` or denied, but a `review` tool is never
-widened to `auto` and a withheld tool is never admitted. Policy denials are
-audited (`policy_denied`), counted (`gm_agent_actions_total{outcome="denied_policy"}`)
-and replayable (new `DenyReason::Policy`).
+**Multi-agent orchestration (#12, `gm-agent::roster`)** — a single room can now
+host many agents at once, each a distinct principal under its **own** capability
+grant. An `AgentRoster` is the per-room registry of agents→grants;
+`AgentGateway::handle_in_room` dispatches an inbound call to the calling agent's
+grant (a caller not on the roster has no grant and is refused, audited
+`unknown_agent`). On top of independent agents, **delegation**
+(`handle_delegated`) lets one agent ask another to act: the delegated call is
+mediated under the **worker's** grant — so delegation cannot launder privilege
+(delegating a tool the worker lacks is still refused) — and the delegating
+principal is recorded (`delegated_by …`) so the audit trail and a replay show the
+full orchestrator→worker chain (new `replay::StepKind::Delegated { by }`).
+`discoverable_tools` gives an orchestrator the per-agent, grant-scoped view of
+who can do what.
 
-(Earlier in the same sequence, shipped to `main`: cost/token accounting (#8),
-the resolved-state cache (#10) in PR #6, and replayable agent sessions (#9) in
-PR #7.)
+(Earlier in the same sequence, shipped to `main`: cost/token accounting (#8) and
+the resolved-state cache (#10) in PR #6, replayable agent sessions (#9) in PR #7,
+and the declarative policy engine (#11) in PR #8.)
 
-Verified: **92 workspace tests**, `clippy -D warnings` clean, `rustfmt` clean.
+Verified: **98 workspace tests**, `clippy -D warnings` clean, `rustfmt` clean.
 
 ## How we'll know we've won
 
