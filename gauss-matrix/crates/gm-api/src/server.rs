@@ -34,6 +34,23 @@ pub trait RoomTimeline {
     fn room_timeline(&self, room: &RoomId) -> Vec<Pdu>;
 }
 
+/// Create a room (the `POST /createRoom` path).
+///
+/// Takes `&self` for the same reason as [`Login`]: the ingress is a shared
+/// front and a persisting implementation uses interior mutability. Writes the
+/// canonical initial state (create, creator membership, power levels, and the
+/// optional name/topic) and returns the new room id.
+pub trait RoomCreator {
+    /// Create a room owned by `creator` with an optional `name` and `topic`,
+    /// returning the new room id (or `None` if creation was refused).
+    fn create_room(
+        &self,
+        creator: &UserId,
+        name: Option<&str>,
+        topic: Option<&str>,
+    ) -> Option<RoomId>;
+}
+
 /// The result of a successful login: the full user id and a fresh access token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginGrant {
@@ -76,9 +93,15 @@ pub trait MessageSender {
 
 /// The full capability set the ingress requires of a homeserver. Blanket-
 /// implemented: any type providing all the capability traits is a `Homeserver`.
-pub trait Homeserver: TokenAuthority + RoomReader + RoomTimeline + Login + MessageSender {}
+pub trait Homeserver:
+    TokenAuthority + RoomReader + RoomTimeline + RoomCreator + Login + MessageSender
+{
+}
 
-impl<T: TokenAuthority + RoomReader + RoomTimeline + Login + MessageSender> Homeserver for T {}
+impl<T> Homeserver for T where
+    T: TokenAuthority + RoomReader + RoomTimeline + RoomCreator + Login + MessageSender
+{
+}
 
 /// A homeserver that provides nothing — the default for an ingress with no
 /// service core wired in. Public endpoints still work; authenticated endpoints
@@ -106,6 +129,17 @@ impl RoomReader for NoServer {
 impl RoomTimeline for NoServer {
     fn room_timeline(&self, _room: &RoomId) -> Vec<Pdu> {
         Vec::new()
+    }
+}
+
+impl RoomCreator for NoServer {
+    fn create_room(
+        &self,
+        _creator: &UserId,
+        _name: Option<&str>,
+        _topic: Option<&str>,
+    ) -> Option<RoomId> {
+        None
     }
 }
 
