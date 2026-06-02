@@ -122,6 +122,10 @@ impl<S: Store + Clone> RoomReader for GaussServer<S> {
     ) -> Option<String> {
         RoomService::new(self.store.clone()).state_event_content(room, event_type, state_key)
     }
+
+    fn room_state(&self, room: &RoomId) -> Vec<Pdu> {
+        RoomService::new(self.store.clone()).current_state_pdus(room)
+    }
 }
 
 impl<S: Store + Clone> RoomTimeline for GaussServer<S> {

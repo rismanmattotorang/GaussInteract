@@ -18,8 +18,8 @@
 use crate::ingress::{Ingress, Request, Response};
 use crate::Method;
 use gm_api::{Homeserver, MatrixError};
-use std::io::{self, BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 
 /// The cap on a request body we will buffer, to bound memory on a hostile
 /// `Content-Length` (a real deployment makes this configurable).
@@ -204,7 +204,11 @@ pub fn serve_connection<H: Homeserver>(stream: &TcpStream, ingress: &Ingress<H>)
         Incoming::Malformed | Incoming::Closed => bad_request(),
     };
     let mut writer = stream;
-    write_response(&mut writer, &response)
+    write_response(&mut writer, &response)?;
+    // Connection-per-request: signal end-of-response by closing the write half,
+    // so the client's read completes even if the caller keeps the stream alive.
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    Ok(())
 }
 
 /// Accept and serve connections on `listener` forever, one at a time.
@@ -240,6 +244,55 @@ pub fn encode_request(
     let mut bytes = out.into_bytes();
     bytes.extend_from_slice(body.as_bytes());
     bytes
+}
+
+/// The outbound HTTP client: connect to `addr`, send one request, and read the
+/// response, returning `(status, body)`. This is the wire side of the
+/// federation *sender* — delivering a transaction to a peer's `/send/{txnId}`.
+/// Connection-per-request, matching [`serve`]; production pools connections.
+pub fn send_request<A: ToSocketAddrs>(
+    addr: A,
+    method: Method,
+    target: &str,
+    authorization: Option<&str>,
+    body: Option<&str>,
+) -> io::Result<(u16, String)> {
+    let mut stream = TcpStream::connect(addr)?;
+    stream.write_all(&encode_request(method, target, authorization, body))?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
+    parse_response(&raw)
+}
+
+/// Deliver a federation `transaction` (JSON) to `addr`'s `/send/{txn_id}` with
+/// the given `X-Matrix` authorization header, returning `(status, body)`.
+pub fn deliver_transaction<A: ToSocketAddrs>(
+    addr: A,
+    txn_id: &str,
+    authorization: &str,
+    transaction_json: &str,
+) -> io::Result<(u16, String)> {
+    let target = format!("/_matrix/federation/v1/send/{txn_id}");
+    send_request(
+        addr,
+        Method::Put,
+        &target,
+        Some(authorization),
+        Some(transaction_json),
+    )
+}
+
+/// Parse an HTTP response's status code and body.
+fn parse_response(raw: &[u8]) -> io::Result<(u16, String)> {
+    let text = String::from_utf8_lossy(raw);
+    let status = text
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed status line"))?;
+    let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_owned();
+    Ok((status, body))
 }
 
 #[cfg(test)]
@@ -327,5 +380,24 @@ mod tests {
 
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
         assert!(body_of(&response).contains("\"v1.11\""));
+    }
+
+    #[test]
+    fn send_request_client_round_trips_over_tcp() {
+        // Server on a thread; the outbound client (send_request) drives it.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let ingress = Ingress::new();
+            let (stream, _) = listener.accept().unwrap();
+            serve_connection(&stream, &ingress).unwrap();
+        });
+
+        let (status, body) =
+            send_request(addr, Method::Get, "/_matrix/client/versions", None, None).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(status, 200);
+        assert!(body.contains("\"v1.11\""));
     }
 }

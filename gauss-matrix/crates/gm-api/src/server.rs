@@ -26,6 +26,9 @@ pub trait RoomReader {
         event_type: &str,
         state_key: &str,
     ) -> Option<String>;
+
+    /// The room's full current state as events (the SS `/state` path).
+    fn room_state(&self, room: &RoomId) -> Vec<Pdu>;
 }
 
 /// Read-only access to a room's timeline (the CS `/messages` path).
@@ -176,6 +179,10 @@ impl RoomReader for NoServer {
         _state_key: &str,
     ) -> Option<String> {
         None
+    }
+
+    fn room_state(&self, _room: &RoomId) -> Vec<Pdu> {
+        Vec::new()
     }
 }
 

@@ -8,10 +8,12 @@
 
 use gm_api::{events, Json, Pdu};
 use gm_http::ingress::{Ingress, Request};
-use gm_http::Method;
+use gm_http::{transport, Method};
 use gm_store::SharedStore;
 use gm_svc::GaussServer;
 use gm_util::{EventId, RoomId, UserId};
+use std::net::TcpListener;
+use std::thread;
 
 fn name_event(content: &str) -> Pdu {
     Pdu {
@@ -222,6 +224,52 @@ fn client_logs_in_creates_a_room_then_sends_a_message_idempotently() {
         .filter(|e| e.get("type").and_then(Json::as_str) == Some("m.room.message"))
         .count();
     assert_eq!(timeline_msgs, 2);
+}
+
+#[test]
+fn federation_send_delivers_an_event_between_two_servers_over_tcp() {
+    // Node B: a real homeserver listening on an ephemeral port.
+    let store_b = SharedStore::new();
+    let ingress_b = Ingress::with_server(GaussServer::new(store_b.clone(), "b.tld"));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Node A: build a federation transaction carrying one PDU for a B-room, and
+    // deliver it to B's /send endpoint from a client thread (the sender side).
+    let txn = concat!(
+        r#"{"origin":"a.tld","origin_server_ts":1700,"pdus":[{"#,
+        r#""event_id":"$fed1","room_id":"!shared:b.tld","sender":"@carol:a.tld","#,
+        r#""type":"m.room.message","origin_server_ts":1700,"depth":1,"#,
+        r#""prev_events":[],"auth_events":[],"content":{"body":"hello from A"}}]}"#
+    );
+    let sender = thread::spawn(move || {
+        transport::deliver_transaction(
+            addr,
+            "txn-A-1",
+            "X-Matrix origin=a.tld,key=\"ed25519:1\",sig=\"sig\"",
+            txn,
+        )
+    });
+
+    // Node B serves the one inbound connection.
+    let (stream, _) = listener.accept().unwrap();
+    transport::serve_connection(&stream, &ingress_b).unwrap();
+    let (status, body) = sender.join().unwrap().unwrap();
+
+    // B accepted the transaction and acked the PDU.
+    assert_eq!(status, 200);
+    assert!(Json::parse(&body)
+        .unwrap()
+        .get("pdus")
+        .and_then(|p| p.get("$fed1"))
+        .is_some());
+
+    // The federated event is now persisted in B's room timeline.
+    let b = GaussServer::new(store_b, "b.tld");
+    let timeline = b.timeline(&RoomId::parse("!shared:b.tld").unwrap());
+    assert_eq!(timeline.len(), 1);
+    assert_eq!(timeline[0].event_id.as_str(), "$fed1");
+    assert_eq!(timeline[0].sender.as_str(), "@carol:a.tld");
 }
 
 #[test]
