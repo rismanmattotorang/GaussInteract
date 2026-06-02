@@ -17,10 +17,10 @@
 use crate::{AccountStore, RoomService, SessionStore};
 use gm_api::events;
 use gm_api::{
-    FederationReceiver, JoinedRoom, Json, Login, LoginGrant, MessageSender, Pdu, RoomCreator,
-    RoomReader, RoomTimeline, RoomVersion, SyncProvider, SyncView, TokenAuthority,
+    FederationAuth, FederationReceiver, JoinedRoom, Json, Login, LoginGrant, MessageSender, Pdu,
+    RoomCreator, RoomReader, RoomTimeline, RoomVersion, SyncProvider, SyncView, TokenAuthority,
 };
-use gm_fed::Transaction;
+use gm_fed::{auth as fed_auth, Transaction};
 use gm_store::{cf, Store};
 use gm_util::{EventId, RoomId, UserId};
 use std::collections::BTreeMap;
@@ -62,6 +62,20 @@ impl<S: Store + Clone> GaussServer<S> {
     /// Append an event to a room (setup / federation ingress).
     pub fn append_event(&self, pdu: &Pdu) {
         RoomService::new(self.store.clone()).append(pdu);
+    }
+
+    /// Register `origin`'s federation signing key, so requests it signs verify.
+    /// Setup/operational helper standing in for the published-key fetch.
+    pub fn register_federation_key(&self, origin: &str, key: &str) {
+        let mut store = self.store.clone();
+        store.put(cf::FEDERATION_KEYS, origin, key.as_bytes());
+    }
+
+    /// The registered federation key for `origin`, if any.
+    fn federation_key(&self, origin: &str) -> Option<String> {
+        self.store
+            .get(cf::FEDERATION_KEYS, origin)
+            .and_then(|v| String::from_utf8(v).ok())
     }
 
     /// The room's timeline, oldest first.
@@ -175,6 +189,32 @@ impl<S: Store + Clone> FederationReceiver for GaussServer<S> {
         let mut obj = BTreeMap::new();
         obj.insert("pdus".to_owned(), Json::Object(results));
         Json::Object(obj)
+    }
+}
+
+impl<S: Store + Clone> FederationAuth for GaussServer<S> {
+    fn verify_federation_request(
+        &self,
+        method: &str,
+        uri: &str,
+        content: Option<&str>,
+        authorization: Option<&str>,
+    ) -> bool {
+        let Some(auth) = authorization.and_then(fed_auth::XMatrixAuth::parse) else {
+            return false;
+        };
+        // The signature must name this server as its destination (anti-replay
+        // across servers); reject if it targets someone else.
+        if let Some(destination) = &auth.destination {
+            if destination != &self.server_name {
+                return false;
+            }
+        }
+        let Some(key) = self.federation_key(&auth.origin) else {
+            return false; // origin's key is unknown -> cannot verify
+        };
+        let bytes = fed_auth::signing_bytes(method, uri, &auth.origin, &self.server_name, content);
+        fed_auth::verify(&bytes, &auth.signature, &key)
     }
 }
 
@@ -485,6 +525,44 @@ mod tests {
         // Timeline carries the message that was sent.
         assert!(jr.timeline.iter().any(|p| p.kind == events::ROOM_MESSAGE));
         assert!(view.next_batch.starts_with('s'));
+    }
+
+    #[test]
+    fn verify_federation_request_checks_the_signature_against_the_registered_key() {
+        let s = GaussServer::new(SharedStore::new(), "b.tld");
+        s.register_federation_key("a.tld", "a-key");
+
+        let uri = "/_matrix/federation/v1/send/t1";
+        let body = r#"{"pdus":[]}"#;
+        let bytes = gm_fed::auth::signing_bytes("PUT", uri, "a.tld", "b.tld", Some(body));
+        let good = gm_fed::auth::XMatrixAuth {
+            origin: "a.tld".to_owned(),
+            destination: Some("b.tld".to_owned()),
+            key_id: "ed25519:1".to_owned(),
+            signature: gm_fed::auth::sign(&bytes, "a-key"),
+        }
+        .to_header();
+
+        // A correctly-signed request from a known origin verifies.
+        assert!(s.verify_federation_request("PUT", uri, Some(body), Some(&good)));
+        // No header, an unknown origin, a wrong destination, or a bad signature fail.
+        assert!(!s.verify_federation_request("PUT", uri, Some(body), None));
+        let wrong_sig = gm_fed::auth::XMatrixAuth {
+            origin: "a.tld".to_owned(),
+            destination: Some("b.tld".to_owned()),
+            key_id: "ed25519:1".to_owned(),
+            signature: gm_fed::auth::sign(&bytes, "wrong-key"),
+        }
+        .to_header();
+        assert!(!s.verify_federation_request("PUT", uri, Some(body), Some(&wrong_sig)));
+        let unknown_origin = gm_fed::auth::XMatrixAuth {
+            origin: "evil.tld".to_owned(),
+            destination: Some("b.tld".to_owned()),
+            key_id: "ed25519:1".to_owned(),
+            signature: gm_fed::auth::sign(&bytes, "a-key"),
+        }
+        .to_header();
+        assert!(!s.verify_federation_request("PUT", uri, Some(body), Some(&unknown_origin)));
     }
 
     #[test]

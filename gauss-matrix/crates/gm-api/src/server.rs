@@ -76,6 +76,25 @@ pub trait FederationReceiver {
     fn receive_transaction(&self, txn: &crate::Json) -> crate::Json;
 }
 
+/// Verify an inbound federation request's `X-Matrix` signature (spec §III.E).
+///
+/// Given the request's method, URI, body and `Authorization` header, the
+/// implementation parses the `X-Matrix` signature, reconstructs the canonical
+/// signing object (with itself as the destination) and verifies it against the
+/// origin server's key. The ingress rejects a request that does not verify with
+/// `401` before any handler runs.
+pub trait FederationAuth {
+    /// Whether the federation request is authentically signed by its claimed
+    /// origin.
+    fn verify_federation_request(
+        &self,
+        method: &str,
+        uri: &str,
+        content: Option<&str>,
+        authorization: Option<&str>,
+    ) -> bool;
+}
+
 /// Create a room (the `POST /createRoom` path).
 ///
 /// Takes `&self` for the same reason as [`Login`]: the ingress is a shared
@@ -144,6 +163,7 @@ pub trait Homeserver:
     + MessageSender
     + SyncProvider
     + FederationReceiver
+    + FederationAuth
 {
 }
 
@@ -156,6 +176,7 @@ impl<T> Homeserver for T where
         + MessageSender
         + SyncProvider
         + FederationReceiver
+        + FederationAuth
 {
 }
 
@@ -221,6 +242,19 @@ impl FederationReceiver for NoServer {
             crate::Json::Object(std::collections::BTreeMap::new()),
         );
         crate::Json::Object(obj)
+    }
+}
+
+impl FederationAuth for NoServer {
+    fn verify_federation_request(
+        &self,
+        _method: &str,
+        _uri: &str,
+        _content: Option<&str>,
+        _authorization: Option<&str>,
+    ) -> bool {
+        // With no federation keys configured, no inbound request verifies.
+        false
     }
 }
 

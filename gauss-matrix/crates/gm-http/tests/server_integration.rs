@@ -226,37 +226,47 @@ fn client_logs_in_creates_a_room_then_sends_a_message_idempotently() {
     assert_eq!(timeline_msgs, 2);
 }
 
+/// The federation transaction node A sends (one PDU for a room on B).
+const FED_TXN: &str = concat!(
+    r#"{"origin":"a.tld","origin_server_ts":1700,"pdus":[{"#,
+    r#""event_id":"$fed1","room_id":"!shared:b.tld","sender":"@carol:a.tld","#,
+    r#""type":"m.room.message","origin_server_ts":1700,"depth":1,"#,
+    r#""prev_events":[],"auth_events":[],"content":{"body":"hello from A"}}]}"#
+);
+const FED_TARGET: &str = "/_matrix/federation/v1/send/txn-A-1";
+
+/// Build the `X-Matrix` header for the federation transaction, signed with `key`.
+fn signed_fed_header(key: &str) -> String {
+    let bytes = gm_fed::auth::signing_bytes("PUT", FED_TARGET, "a.tld", "b.tld", Some(FED_TXN));
+    gm_fed::auth::XMatrixAuth {
+        origin: "a.tld".to_owned(),
+        destination: Some("b.tld".to_owned()),
+        key_id: "ed25519:1".to_owned(),
+        signature: gm_fed::auth::sign(&bytes, key),
+    }
+    .to_header()
+}
+
 #[test]
-fn federation_send_delivers_an_event_between_two_servers_over_tcp() {
-    // Node B: a real homeserver listening on an ephemeral port.
+fn federation_send_delivers_a_signed_event_between_two_servers_over_tcp() {
+    // Node B: a real homeserver that has registered node A's federation key.
     let store_b = SharedStore::new();
-    let ingress_b = Ingress::with_server(GaussServer::new(store_b.clone(), "b.tld"));
+    let server_b = GaussServer::new(store_b.clone(), "b.tld");
+    server_b.register_federation_key("a.tld", "a-fed-key");
+    let ingress_b = Ingress::with_server(server_b);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
-    // Node A: build a federation transaction carrying one PDU for a B-room, and
-    // deliver it to B's /send endpoint from a client thread (the sender side).
-    let txn = concat!(
-        r#"{"origin":"a.tld","origin_server_ts":1700,"pdus":[{"#,
-        r#""event_id":"$fed1","room_id":"!shared:b.tld","sender":"@carol:a.tld","#,
-        r#""type":"m.room.message","origin_server_ts":1700,"depth":1,"#,
-        r#""prev_events":[],"auth_events":[],"content":{"body":"hello from A"}}]}"#
-    );
-    let sender = thread::spawn(move || {
-        transport::deliver_transaction(
-            addr,
-            "txn-A-1",
-            "X-Matrix origin=a.tld,key=\"ed25519:1\",sig=\"sig\"",
-            txn,
-        )
-    });
+    // Node A signs the transaction with its key and delivers it (sender side).
+    let header = signed_fed_header("a-fed-key");
+    let sender =
+        thread::spawn(move || transport::deliver_transaction(addr, "txn-A-1", &header, FED_TXN));
 
-    // Node B serves the one inbound connection.
     let (stream, _) = listener.accept().unwrap();
     transport::serve_connection(&stream, &ingress_b).unwrap();
     let (status, body) = sender.join().unwrap().unwrap();
 
-    // B accepted the transaction and acked the PDU.
+    // B verified the signature, accepted the transaction, and acked the PDU.
     assert_eq!(status, 200);
     assert!(Json::parse(&body)
         .unwrap()
@@ -270,6 +280,32 @@ fn federation_send_delivers_an_event_between_two_servers_over_tcp() {
     assert_eq!(timeline.len(), 1);
     assert_eq!(timeline[0].event_id.as_str(), "$fed1");
     assert_eq!(timeline[0].sender.as_str(), "@carol:a.tld");
+}
+
+#[test]
+fn federation_send_with_a_bad_signature_is_rejected_and_ingests_nothing() {
+    let store_b = SharedStore::new();
+    let server_b = GaussServer::new(store_b.clone(), "b.tld");
+    server_b.register_federation_key("a.tld", "a-fed-key");
+    let ingress_b = Ingress::with_server(server_b);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // A signs with the WRONG key — B's verification fails.
+    let header = signed_fed_header("not-a-fed-key");
+    let sender =
+        thread::spawn(move || transport::deliver_transaction(addr, "txn-A-1", &header, FED_TXN));
+
+    let (stream, _) = listener.accept().unwrap();
+    transport::serve_connection(&stream, &ingress_b).unwrap();
+    let (status, _) = sender.join().unwrap().unwrap();
+
+    assert_eq!(status, 401);
+    // Nothing was ingested.
+    let b = GaussServer::new(store_b, "b.tld");
+    assert!(b
+        .timeline(&RoomId::parse("!shared:b.tld").unwrap())
+        .is_empty());
 }
 
 #[test]

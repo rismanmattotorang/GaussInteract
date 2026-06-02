@@ -18,6 +18,8 @@
 #![warn(missing_docs)]
 #![deny(rust_2018_idioms)]
 
+pub mod auth;
+
 use gm_api::{Json, Pdu};
 use std::collections::BTreeMap;
 use std::fmt;

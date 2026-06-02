@@ -33,6 +33,6 @@ pub use json::Json;
 pub use pdu::Pdu;
 pub use room_version::RoomVersion;
 pub use server::{
-    FederationReceiver, Homeserver, JoinedRoom, Login, LoginGrant, MessageSender, NoServer,
-    RoomCreator, RoomReader, RoomTimeline, SyncProvider, SyncView,
+    FederationAuth, FederationReceiver, Homeserver, JoinedRoom, Login, LoginGrant, MessageSender,
+    NoServer, RoomCreator, RoomReader, RoomTimeline, SyncProvider, SyncView,
 };
