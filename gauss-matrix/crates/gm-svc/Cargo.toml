@@ -16,6 +16,7 @@ name = "gm_svc"
 
 [dependencies]
 gm-api = { path = "../gm-api" }
+gm-fed = { path = "../gm-fed" }
 gm-stateres = { path = "../gm-stateres" }
 gm-store = { path = "../gm-store" }
 gm-util = { path = "../gm-util" }

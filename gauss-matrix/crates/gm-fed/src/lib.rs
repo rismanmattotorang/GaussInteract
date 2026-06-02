@@ -18,7 +18,9 @@
 #![warn(missing_docs)]
 #![deny(rust_2018_idioms)]
 
-use gm_api::Pdu;
+use gm_api::{Json, Pdu};
+use std::collections::BTreeMap;
+use std::fmt;
 
 /// An Ephemeral Data Unit — non-persistent federation traffic (typing,
 /// receipts, presence, device-list updates).
@@ -29,6 +31,56 @@ pub struct Edu {
     /// Opaque EDU content as JSON.
     pub content_json: String,
 }
+
+impl Edu {
+    /// Serialise to `{"edu_type":…,"content":…}`.
+    pub fn to_json(&self) -> Json {
+        let mut obj = BTreeMap::new();
+        obj.insert("edu_type".to_owned(), Json::String(self.edu_type.clone()));
+        obj.insert(
+            "content".to_owned(),
+            Json::parse(&self.content_json).unwrap_or_else(|_| Json::Object(BTreeMap::new())),
+        );
+        Json::Object(obj)
+    }
+
+    /// Parse from `{"edu_type":…,"content":…}`.
+    pub fn from_json(value: &Json) -> Result<Self, FedError> {
+        let edu_type = value
+            .get("edu_type")
+            .and_then(Json::as_str)
+            .ok_or(FedError::InvalidField("edu_type"))?
+            .to_owned();
+        let content_json = value
+            .get("content")
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "{}".to_owned());
+        Ok(Edu {
+            edu_type,
+            content_json,
+        })
+    }
+}
+
+/// An error decoding a [`Transaction`] or [`Edu`] from JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FedError {
+    /// A required field was absent.
+    MissingField(&'static str),
+    /// A field was present but malformed.
+    InvalidField(&'static str),
+}
+
+impl fmt::Display for FedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FedError::MissingField(k) => write!(f, "missing federation field: {k}"),
+            FedError::InvalidField(k) => write!(f, "invalid federation field: {k}"),
+        }
+    }
+}
+
+impl std::error::Error for FedError {}
 
 /// A Server–Server transaction: the unit of federation transfer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +110,67 @@ impl Transaction {
     pub fn is_empty(&self) -> bool {
         self.pdus.is_empty() && self.edus.is_empty()
     }
+
+    /// Serialise to the SS transaction JSON shape:
+    /// `{"origin":…,"origin_server_ts":…,"pdus":[…],"edus":[…]}`.
+    pub fn to_json(&self) -> Json {
+        let mut obj = BTreeMap::new();
+        obj.insert("origin".to_owned(), Json::String(self.origin.clone()));
+        obj.insert(
+            "origin_server_ts".to_owned(),
+            Json::Number(self.origin_server_ts as f64),
+        );
+        obj.insert(
+            "pdus".to_owned(),
+            Json::Array(self.pdus.iter().map(Pdu::to_json).collect()),
+        );
+        obj.insert(
+            "edus".to_owned(),
+            Json::Array(self.edus.iter().map(Edu::to_json).collect()),
+        );
+        Json::Object(obj)
+    }
+
+    /// Parse from the SS transaction JSON shape, re-validating every PDU (the
+    /// transaction arrives from another, untrusted server). A missing `edus` is
+    /// treated as empty; a malformed PDU or EDU rejects the whole transaction.
+    pub fn from_json(value: &Json) -> Result<Self, FedError> {
+        let origin = value
+            .get("origin")
+            .and_then(Json::as_str)
+            .ok_or(FedError::InvalidField("origin"))?
+            .to_owned();
+        let origin_server_ts = value
+            .get("origin_server_ts")
+            .and_then(Json::as_u64)
+            .ok_or(FedError::InvalidField("origin_server_ts"))?;
+
+        let mut pdus = Vec::new();
+        for value in array_field(value, "pdus")? {
+            pdus.push(Pdu::from_json(value).map_err(|_| FedError::InvalidField("pdus"))?);
+        }
+        let mut edus = Vec::new();
+        if let Some(items) = value.get("edus") {
+            let items = items.as_array().ok_or(FedError::InvalidField("edus"))?;
+            for value in items {
+                edus.push(Edu::from_json(value)?);
+            }
+        }
+        Ok(Self {
+            origin,
+            origin_server_ts,
+            pdus,
+            edus,
+        })
+    }
+}
+
+fn array_field<'a>(value: &'a Json, key: &'static str) -> Result<&'a [Json], FedError> {
+    value
+        .get(key)
+        .ok_or(FedError::MissingField(key))?
+        .as_array()
+        .ok_or(FedError::InvalidField(key))
 }
 
 /// The state-completeness of a joined room. A **partial-state** join is
@@ -128,6 +241,43 @@ mod tests {
         assert!(!txn.is_empty());
         assert_eq!(txn.pdus.len(), 1);
         assert_eq!(txn.edus.len(), 1);
+    }
+
+    #[test]
+    fn transaction_round_trips_through_json() {
+        let mut txn = Transaction::new("other.tld", 1700);
+        txn.pdus.push(Pdu {
+            event_id: EventId::parse("$e").unwrap(),
+            room_id: RoomId::parse("!r:other.tld").unwrap(),
+            sender: UserId::parse("@bob:other.tld").unwrap(),
+            kind: "m.room.message".to_owned(),
+            state_key: None,
+            origin_server_ts: 1700,
+            depth: 5,
+            prev_events: Vec::new(),
+            auth_events: Vec::new(),
+            content_json: "{\"body\":\"hi\"}".to_owned(),
+        });
+        txn.edus.push(Edu {
+            edu_type: "m.typing".to_owned(),
+            content_json: "{\"user_ids\":[]}".to_owned(),
+        });
+
+        let restored = Transaction::from_json(&txn.to_json()).unwrap();
+        assert_eq!(restored, txn);
+    }
+
+    #[test]
+    fn decoding_a_transaction_rejects_a_malformed_pdu() {
+        let json = Json::parse(
+            r#"{"origin":"other.tld","origin_server_ts":1,"pdus":[{"type":"m.room.message"}]}"#,
+        )
+        .unwrap();
+        // The PDU is missing required fields (event_id, room_id, …).
+        assert_eq!(
+            Transaction::from_json(&json),
+            Err(FedError::InvalidField("pdus"))
+        );
     }
 
     #[test]
