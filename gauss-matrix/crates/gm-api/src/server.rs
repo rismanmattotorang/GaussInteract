@@ -95,8 +95,27 @@ pub trait FederationAuth {
     ) -> bool;
 }
 
-/// Create a room (the `POST /createRoom` path).
+/// Apply an `m.room.member` change (the `/join`, `/leave`, `/invite`, `/kick`,
+/// `/ban` paths).
 ///
+/// `actor` performs the change, setting `target`'s membership to `membership`
+/// (`join` / `leave` / `invite` / `ban` / `knock`). The implementation builds
+/// the member event and authorizes it against current room state (join rules,
+/// invite, power levels); it returns the new event id, or `None` if the change
+/// is not permitted. Takes `&self` (interior mutability), like the other write
+/// capabilities.
+pub trait MembershipChanger {
+    /// Change `target`'s membership in `room` on behalf of `actor`.
+    fn change_membership(
+        &self,
+        actor: &UserId,
+        room: &RoomId,
+        target: &UserId,
+        membership: &str,
+    ) -> Option<String>;
+}
+
+/// Create a room (the `POST /createRoom` path).///
 /// Takes `&self` for the same reason as [`Login`]: the ingress is a shared
 /// front and a persisting implementation uses interior mutability. Writes the
 /// canonical initial state (create, creator membership, power levels, and the
@@ -159,6 +178,7 @@ pub trait Homeserver:
     + RoomReader
     + RoomTimeline
     + RoomCreator
+    + MembershipChanger
     + Login
     + MessageSender
     + SyncProvider
@@ -172,6 +192,7 @@ impl<T> Homeserver for T where
         + RoomReader
         + RoomTimeline
         + RoomCreator
+        + MembershipChanger
         + Login
         + MessageSender
         + SyncProvider
@@ -255,6 +276,18 @@ impl FederationAuth for NoServer {
     ) -> bool {
         // With no federation keys configured, no inbound request verifies.
         false
+    }
+}
+
+impl MembershipChanger for NoServer {
+    fn change_membership(
+        &self,
+        _actor: &UserId,
+        _room: &RoomId,
+        _target: &UserId,
+        _membership: &str,
+    ) -> Option<String> {
+        None
     }
 }
 

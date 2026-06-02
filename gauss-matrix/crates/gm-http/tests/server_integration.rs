@@ -248,6 +248,97 @@ fn signed_fed_header(key: &str) -> String {
 }
 
 #[test]
+fn two_users_converse_after_an_invite_and_join() {
+    // One server hosts both alice and bob.
+    let server = GaussServer::new(SharedStore::new(), "gaussian.tech");
+    server.register_account("alice", "pw");
+    server.register_account("bob", "pw");
+    let ingress = Ingress::with_server(server);
+
+    let login = |user: &str| {
+        let body = format!(
+            r#"{{"type":"m.login.password","identifier":{{"type":"m.id.user","user":"{user}"}},"password":"pw"}}"#
+        );
+        let resp = ingress
+            .handle(&Request::new(Method::Post, "/_matrix/client/v3/login").with_body(&body));
+        format!(
+            "Bearer {}",
+            Json::parse(&resp.body)
+                .unwrap()
+                .get("access_token")
+                .and_then(Json::as_str)
+                .unwrap()
+        )
+    };
+    let alice = login("alice");
+    let bob = login("bob");
+
+    // Alice creates a room.
+    let created = ingress.handle(
+        &Request::new(Method::Post, "/_matrix/client/v3/createRoom").with_authorization(&alice),
+    );
+    let room = Json::parse(&created.body)
+        .unwrap()
+        .get("room_id")
+        .and_then(Json::as_str)
+        .unwrap()
+        .to_owned();
+
+    let post = |target: String, auth: &str, body: &str| {
+        ingress.handle(
+            &Request::new(Method::Post, &target)
+                .with_authorization(auth)
+                .with_body(body),
+        )
+    };
+
+    // Bob cannot join the invite-only room yet.
+    let early_join = ingress.handle(
+        &Request::new(
+            Method::Post,
+            &format!("/_matrix/client/v3/rooms/{room}/join"),
+        )
+        .with_authorization(&bob),
+    );
+    assert_eq!(early_join.status, 403);
+
+    // Alice invites bob; bob joins; bob sends a message.
+    let invite = post(
+        format!("/_matrix/client/v3/rooms/{room}/invite"),
+        &alice,
+        r#"{"user_id":"@bob:gaussian.tech"}"#,
+    );
+    assert_eq!(invite.status, 200);
+    let join = ingress.handle(
+        &Request::new(
+            Method::Post,
+            &format!("/_matrix/client/v3/rooms/{room}/join"),
+        )
+        .with_authorization(&bob),
+    );
+    assert_eq!(join.status, 200);
+    let send = ingress.handle(
+        &Request::new(
+            Method::Put,
+            &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/btxn1"),
+        )
+        .with_authorization(&bob)
+        .with_body(r#"{"msgtype":"m.text","body":"hi from bob"}"#),
+    );
+    assert_eq!(send.status, 200);
+
+    // Bob's /sync now shows the room he joined.
+    let sync = ingress
+        .handle(&Request::new(Method::Get, "/_matrix/client/v3/sync").with_authorization(&bob));
+    assert!(Json::parse(&sync.body)
+        .unwrap()
+        .get("rooms")
+        .and_then(|r| r.get("join"))
+        .and_then(|j| j.get(&room))
+        .is_some());
+}
+
+#[test]
 fn federation_send_delivers_a_signed_event_between_two_servers_over_tcp() {
     // Node B: a real homeserver that has registered node A's federation key.
     let store_b = SharedStore::new();

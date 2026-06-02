@@ -24,6 +24,8 @@
 //! - `GET /_matrix/client/v3/rooms/{roomId}/messages` → the room timeline as a
 //!   `{"chunk":[…]}` page;
 //! - `POST /_matrix/client/v3/createRoom` → originate a room, returning its id;
+//! - `POST /_matrix/client/v3/rooms/{roomId}/{join,leave,invite,kick,ban}` →
+//!   membership changes (authorized by the join-rules / power state machine);
 //! - `GET /_matrix/client/v3/sync` → the joined rooms with state and timeline;
 //! - `PUT /_matrix/federation/v1/send/{txnId}` → ingest an inbound federation
 //!   transaction (PDUs/EDUs), returning the per-PDU acknowledgement;
@@ -254,6 +256,21 @@ impl<H: Homeserver> Ingress<H> {
                 self.serve_send(m, user, req)
             }
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/messages") => self.serve_messages(m),
+            (Method::Post, "/_matrix/client/v3/rooms/{roomId}/join") => {
+                self.serve_membership_self(m, user, "join")
+            }
+            (Method::Post, "/_matrix/client/v3/rooms/{roomId}/leave") => {
+                self.serve_membership_self(m, user, "leave")
+            }
+            (Method::Post, "/_matrix/client/v3/rooms/{roomId}/invite") => {
+                self.serve_membership_target(m, user, req, "invite")
+            }
+            (Method::Post, "/_matrix/client/v3/rooms/{roomId}/kick") => {
+                self.serve_membership_target(m, user, req, "leave")
+            }
+            (Method::Post, "/_matrix/client/v3/rooms/{roomId}/ban") => {
+                self.serve_membership_target(m, user, req, "ban")
+            }
             (Method::Post, "/_matrix/client/v3/createRoom") => self.serve_create_room(user, req),
             (Method::Get, "/_matrix/client/v3/sync") => self.serve_sync(user),
             (Method::Put, "/_matrix/federation/v1/send/{txnId}") => self.serve_federation_send(req),
@@ -354,6 +371,78 @@ impl<H: Homeserver> Ingress<H> {
         {
             Some(room) => Response::json_ok(room_id_body(room.as_str())),
             None => Response::error(403, &MatrixError::forbidden("room creation refused")),
+        }
+    }
+
+    /// `POST /_matrix/client/v3/rooms/{roomId}/{join,leave}`: change the
+    /// authenticated user's own membership. Returns `{"room_id":…}` on success,
+    /// `403 M_FORBIDDEN` if the transition is not permitted.
+    fn serve_membership_self(
+        &self,
+        m: &RouteMatch,
+        user: Option<&UserId>,
+        membership: &str,
+    ) -> Response {
+        let Some(actor) = user else {
+            return Response::error(
+                401,
+                &MatrixError::unknown_token("unrecognized access token"),
+            );
+        };
+        let Some(room) = m.param("roomId").and_then(|r| RoomId::parse(r).ok()) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        match self
+            .server
+            .change_membership(actor, &room, actor, membership)
+        {
+            Some(_) => Response::json_ok(room_id_body(room.as_str())),
+            None => Response::error(
+                403,
+                &MatrixError::forbidden("membership change not permitted"),
+            ),
+        }
+    }
+
+    /// `POST /_matrix/client/v3/rooms/{roomId}/{invite,kick,ban}`: change another
+    /// user's membership (the target is `user_id` in the body). Returns `{}` on
+    /// success, `403 M_FORBIDDEN` if not permitted, `400` on a bad body.
+    fn serve_membership_target(
+        &self,
+        m: &RouteMatch,
+        user: Option<&UserId>,
+        req: &Request<'_>,
+        membership: &str,
+    ) -> Response {
+        let Some(actor) = user else {
+            return Response::error(
+                401,
+                &MatrixError::unknown_token("unrecognized access token"),
+            );
+        };
+        let Some(room) = m.param("roomId").and_then(|r| RoomId::parse(r).ok()) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        let target = req
+            .body
+            .and_then(|b| Json::parse(b).ok())
+            .and_then(|j| j.get("user_id").and_then(Json::as_str).map(str::to_owned))
+            .and_then(|u| UserId::parse(u).ok());
+        let Some(target) = target else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_BAD_JSON", "missing or invalid user_id"),
+            );
+        };
+        match self
+            .server
+            .change_membership(actor, &room, &target, membership)
+        {
+            Some(_) => Response::json_ok("{}".to_owned()),
+            None => Response::error(
+                403,
+                &MatrixError::forbidden("membership change not permitted"),
+            ),
         }
     }
 
@@ -634,8 +723,8 @@ fn json_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use gm_api::{
-        FederationAuth, FederationReceiver, JoinedRoom, Login, MessageSender, RoomCreator,
-        RoomReader, RoomTimeline, SyncProvider, TokenAuthority,
+        FederationAuth, FederationReceiver, JoinedRoom, Login, MembershipChanger, MessageSender,
+        RoomCreator, RoomReader, RoomTimeline, SyncProvider, TokenAuthority,
     };
     use std::collections::BTreeMap;
 
@@ -721,6 +810,18 @@ mod tests {
             // The double echoes a room id derived from the optional name.
             let local = name.unwrap_or("new");
             RoomId::parse(format!("!{local}:gaussian.tech")).ok()
+        }
+    }
+    impl MembershipChanger for TestServer {
+        fn change_membership(
+            &self,
+            _actor: &UserId,
+            _room: &RoomId,
+            _target: &UserId,
+            membership: &str,
+        ) -> Option<String> {
+            // The double accepts any membership change, echoing an event id.
+            Some(format!("$m_{membership}"))
         }
     }
     impl FederationAuth for TestServer {
@@ -1156,6 +1257,59 @@ mod tests {
         let req = Request::new(Method::Post, "/_matrix/client/v3/createRoom")
             .with_authorization("Bearer tok123");
         assert_eq!(authed().handle(&req).status, 200);
+    }
+
+    #[test]
+    fn join_returns_the_room_id_when_authorized() {
+        let req = Request::new(
+            Method::Post,
+            "/_matrix/client/v3/rooms/!r:gaussian.tech/join",
+        )
+        .with_authorization("Bearer tok123");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        assert_eq!(
+            Json::parse(&resp.body)
+                .unwrap()
+                .get("room_id")
+                .and_then(Json::as_str),
+            Some("!r:gaussian.tech")
+        );
+    }
+
+    #[test]
+    fn join_requires_authentication() {
+        let resp = authed().dispatch(
+            Method::Post,
+            "/_matrix/client/v3/rooms/!r:gaussian.tech/join",
+        );
+        assert_eq!(resp.status, 401);
+    }
+
+    #[test]
+    fn invite_reads_the_target_user_and_returns_empty_object() {
+        let req = Request::new(
+            Method::Post,
+            "/_matrix/client/v3/rooms/!r:gaussian.tech/invite",
+        )
+        .with_authorization("Bearer tok123")
+        .with_body(r#"{"user_id":"@bob:gaussian.tech"}"#);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, "{}");
+    }
+
+    #[test]
+    fn invite_without_a_user_id_is_400() {
+        let req = Request::new(
+            Method::Post,
+            "/_matrix/client/v3/rooms/!r:gaussian.tech/invite",
+        )
+        .with_authorization("Bearer tok123")
+        .with_body("{}");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("M_BAD_JSON"));
     }
 
     #[test]
