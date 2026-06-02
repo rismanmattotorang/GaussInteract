@@ -17,6 +17,7 @@ members = [
     "crates/gm-fed",
     "crates/gm-http",
     "crates/gm-obs",
+    "crates/gm-server",
     "crates/gm-shard",
     "crates/gm-stateres",
     "crates/gm-store",
