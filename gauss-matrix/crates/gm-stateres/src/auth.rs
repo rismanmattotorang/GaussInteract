@@ -13,16 +13,17 @@
 //! - `m.room.create` is allowed only as the room's first event (no prior
 //!   create);
 //! - every other event requires the room to have a create event;
-//! - a sender must be **joined** to send events, except their own
-//!   `m.room.member` transition (joining/leaving oneself);
-//! - the sender must have sufficient **power level** for the event — the
-//!   `state_default` for state events, the `events_default` for messages — read
-//!   from `m.room.power_levels` (before which the room creator has power 100 and
-//!   everyone else 0).
+//! - `m.room.member` transitions follow the join-rules / invite state machine
+//!   (see [`check_auth`]): self-join into a `public` room or to accept an
+//!   invite; invite/kick/ban by a sufficiently-powered member; leaving oneself;
+//! - any other sender must be **joined**, with sufficient **power level** for
+//!   the event — the `state_default` for state events, the `events_default` for
+//!   messages — read from `m.room.power_levels` (before which the room creator
+//!   has power 100 and everyone else 0).
 //!
-//! The remaining rules (join-rules / invite state machine, per-event-type power
-//! overrides, redaction and third-party-invite rules) layer on top of this and
-//! are the next increment.
+//! The remaining rules (restricted joins, third-party invites, redaction power,
+//! per-event-type power overrides) layer on top of this and are the next
+//! increment.
 
 use gm_api::{events, Json, Pdu};
 
@@ -37,12 +38,19 @@ pub enum AuthError {
     SenderNotJoined,
     /// The sender lacks the power level the event requires.
     InsufficientPower,
+    /// The `m.room.member` transition is not permitted (join rules / invite
+    /// state machine).
+    MembershipForbidden,
 }
 
 /// The default power required to send a state event (no `state_default` set).
 const DEFAULT_STATE_POWER: i64 = 50;
 /// The default power required to send a message event (no `events_default`).
 const DEFAULT_EVENTS_POWER: i64 = 0;
+/// Default power to invite / kick / ban when `m.room.power_levels` omits them.
+const DEFAULT_INVITE_POWER: i64 = 0;
+const DEFAULT_KICK_POWER: i64 = 50;
+const DEFAULT_BAN_POWER: i64 = 50;
 /// The power a room creator holds before `m.room.power_levels` is set.
 const CREATOR_POWER: i64 = 100;
 
@@ -66,17 +74,12 @@ pub fn check_auth(event: &Pdu, state: &[Pdu]) -> Result<(), AuthError> {
         return Err(AuthError::NoCreateEvent);
     }
 
-    let sender = event.sender.as_str();
-
-    // A user's own membership transition (join/leave/knock) is self-authorized
-    // here; the join-rules/invite machine that further constrains it is a later
-    // increment.
-    let is_own_membership =
-        event.kind == events::ROOM_MEMBER && event.state_key.as_deref() == Some(sender);
-    if is_own_membership {
-        return Ok(());
+    // Membership events follow the join-rules / invite state machine.
+    if event.kind == events::ROOM_MEMBER {
+        return check_member_auth(event, &view);
     }
 
+    let sender = event.sender.as_str();
     if view.membership(sender) != Some("join") {
         return Err(AuthError::SenderNotJoined);
     }
@@ -92,10 +95,95 @@ pub fn check_auth(event: &Pdu, state: &[Pdu]) -> Result<(), AuthError> {
     Ok(())
 }
 
+/// Authorize an `m.room.member` event against the membership state machine.
+fn check_member_auth(event: &Pdu, view: &AuthView<'_>) -> Result<(), AuthError> {
+    let sender = event.sender.as_str();
+    // The target is the state key (whose membership this event sets).
+    let Some(target) = event.state_key.as_deref() else {
+        return Err(AuthError::MembershipForbidden);
+    };
+    let new = Json::parse(&event.content_json).ok().and_then(|c| {
+        c.get("membership")
+            .and_then(Json::as_str)
+            .map(str::to_owned)
+    });
+    let new = new.as_deref().unwrap_or("");
+    let target_current = view.membership(target);
+
+    match new {
+        "join" => {
+            // Only the user themselves joins; a member is never *joined* by
+            // another (that is an invite).
+            if target != sender {
+                return Err(AuthError::MembershipForbidden);
+            }
+            // The room creator's initial join (part of room creation) is allowed.
+            if view.creator().as_deref() == Some(sender) && target_current.is_none() {
+                return Ok(());
+            }
+            // Otherwise: a public room, or accepting a pending invite.
+            match view.join_rule() {
+                "public" => Ok(()),
+                _ if target_current == Some("invite") => Ok(()),
+                _ => Err(AuthError::MembershipForbidden),
+            }
+        }
+        "invite" => {
+            if view.membership(sender) != Some("join") {
+                return Err(AuthError::SenderNotJoined);
+            }
+            if matches!(target_current, Some("join") | Some("ban")) {
+                return Err(AuthError::MembershipForbidden);
+            }
+            if view.power_level(sender) < view.invite_level() {
+                return Err(AuthError::InsufficientPower);
+            }
+            Ok(())
+        }
+        "leave" => {
+            // Leaving / declining an invite for oneself is always allowed.
+            if target == sender {
+                return Ok(());
+            }
+            // Kicking another requires join + the kick power, strictly above the
+            // target's power.
+            if view.membership(sender) != Some("join") {
+                return Err(AuthError::SenderNotJoined);
+            }
+            if view.power_level(sender) < view.kick_level()
+                || view.power_level(sender) <= view.power_level(target)
+            {
+                return Err(AuthError::InsufficientPower);
+            }
+            Ok(())
+        }
+        "ban" => {
+            if view.membership(sender) != Some("join") {
+                return Err(AuthError::SenderNotJoined);
+            }
+            if view.power_level(sender) < view.ban_level()
+                || view.power_level(sender) <= view.power_level(target)
+            {
+                return Err(AuthError::InsufficientPower);
+            }
+            Ok(())
+        }
+        "knock" => {
+            if target == sender && view.join_rule() == "knock" {
+                Ok(())
+            } else {
+                Err(AuthError::MembershipForbidden)
+            }
+        }
+        _ => Err(AuthError::MembershipForbidden),
+    }
+}
+
 /// A read-only view of the room's current state for the auth checks.
 struct AuthView<'a> {
     create: Option<&'a Pdu>,
     power_levels: Option<Json>,
+    join_rules: Option<Json>,
     members: Vec<(&'a str, String)>, // (user, membership)
 }
 
@@ -103,11 +191,13 @@ impl<'a> AuthView<'a> {
     fn new(state: &'a [Pdu]) -> Self {
         let mut create = None;
         let mut power_levels = None;
+        let mut join_rules = None;
         let mut members = Vec::new();
         for pdu in state {
             match pdu.kind.as_str() {
                 events::ROOM_CREATE => create = Some(pdu),
                 events::ROOM_POWER_LEVELS => power_levels = Json::parse(&pdu.content_json).ok(),
+                events::ROOM_JOIN_RULES => join_rules = Json::parse(&pdu.content_json).ok(),
                 events::ROOM_MEMBER => {
                     if let Some(user) = pdu.state_key.as_deref() {
                         if let Some(membership) =
@@ -127,6 +217,7 @@ impl<'a> AuthView<'a> {
         Self {
             create,
             power_levels,
+            join_rules,
             members,
         }
     }
@@ -136,6 +227,33 @@ impl<'a> AuthView<'a> {
             .iter()
             .find(|(u, _)| *u == user)
             .map(|(_, m)| m.as_str())
+    }
+
+    /// The room's join rule, defaulting to `invite` (the Matrix default when no
+    /// `m.room.join_rules` is set).
+    fn join_rule(&self) -> &str {
+        self.join_rules
+            .as_ref()
+            .and_then(|j| j.get("join_rule").and_then(Json::as_str))
+            .unwrap_or("invite")
+    }
+
+    /// A power level from `m.room.power_levels` by key, or `default`.
+    fn level(&self, key: &str, default: i64) -> i64 {
+        self.power_levels
+            .as_ref()
+            .and_then(|pl| pl.get(key).and_then(Json::as_i64))
+            .unwrap_or(default)
+    }
+
+    fn invite_level(&self) -> i64 {
+        self.level("invite", DEFAULT_INVITE_POWER)
+    }
+    fn kick_level(&self) -> i64 {
+        self.level("kick", DEFAULT_KICK_POWER)
+    }
+    fn ban_level(&self) -> i64 {
+        self.level("ban", DEFAULT_BAN_POWER)
     }
 
     /// The room creator from the create event's content, if present.
@@ -258,16 +376,117 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_user_may_transition_their_own_membership() {
-        // Bob joins (his own m.room.member) even though he is not yet a member.
-        let join = pdu(
+    fn bob_join() -> Pdu {
+        pdu(
             events::ROOM_MEMBER,
             "@bob:gaussian.tech",
             Some("@bob:gaussian.tech"),
             r#"{"membership":"join"}"#,
+        )
+    }
+
+    #[test]
+    fn self_join_is_refused_in_an_invite_only_room() {
+        // ops_room_state has no join_rules -> default "invite": bob cannot just
+        // join without an invite.
+        assert_eq!(
+            check_auth(&bob_join(), &ops_room_state()),
+            Err(AuthError::MembershipForbidden)
         );
-        assert_eq!(check_auth(&join, &ops_room_state()), Ok(()));
+    }
+
+    #[test]
+    fn self_join_is_allowed_in_a_public_room() {
+        let mut state = ops_room_state();
+        state.push(pdu(
+            events::ROOM_JOIN_RULES,
+            "@alice:gaussian.tech",
+            Some(""),
+            r#"{"join_rule":"public"}"#,
+        ));
+        assert_eq!(check_auth(&bob_join(), &state), Ok(()));
+    }
+
+    #[test]
+    fn invited_user_may_accept_the_invite_by_joining() {
+        let mut state = ops_room_state();
+        state.push(pdu(
+            events::ROOM_MEMBER,
+            "@alice:gaussian.tech",
+            Some("@bob:gaussian.tech"),
+            r#"{"membership":"invite"}"#,
+        ));
+        assert_eq!(check_auth(&bob_join(), &state), Ok(()));
+    }
+
+    #[test]
+    fn a_joined_member_may_invite_a_powered_check() {
+        // Alice (joined, power 100) invites bob: allowed.
+        let invite = pdu(
+            events::ROOM_MEMBER,
+            "@alice:gaussian.tech",
+            Some("@bob:gaussian.tech"),
+            r#"{"membership":"invite"}"#,
+        );
+        assert_eq!(check_auth(&invite, &ops_room_state()), Ok(()));
+        // A non-member cannot invite.
+        let by_stranger = pdu(
+            events::ROOM_MEMBER,
+            "@mallory:gaussian.tech",
+            Some("@bob:gaussian.tech"),
+            r#"{"membership":"invite"}"#,
+        );
+        assert_eq!(
+            check_auth(&by_stranger, &ops_room_state()),
+            Err(AuthError::SenderNotJoined)
+        );
+    }
+
+    #[test]
+    fn kick_and_ban_need_power_above_the_target() {
+        // Bob (joined, power 0) is in the room.
+        let mut state = ops_room_state();
+        state.push(bob_join());
+        // Alice (100) may kick bob (0).
+        let kick = pdu(
+            events::ROOM_MEMBER,
+            "@alice:gaussian.tech",
+            Some("@bob:gaussian.tech"),
+            r#"{"membership":"leave"}"#,
+        );
+        assert_eq!(check_auth(&kick, &state), Ok(()));
+        // Bob (0) may not kick alice (100).
+        let bob_kicks_alice = pdu(
+            events::ROOM_MEMBER,
+            "@bob:gaussian.tech",
+            Some("@alice:gaussian.tech"),
+            r#"{"membership":"leave"}"#,
+        );
+        assert_eq!(
+            check_auth(&bob_kicks_alice, &state),
+            Err(AuthError::InsufficientPower)
+        );
+        // Alice may ban bob.
+        let ban = pdu(
+            events::ROOM_MEMBER,
+            "@alice:gaussian.tech",
+            Some("@bob:gaussian.tech"),
+            r#"{"membership":"ban"}"#,
+        );
+        assert_eq!(check_auth(&ban, &state), Ok(()));
+    }
+
+    #[test]
+    fn a_user_may_always_leave() {
+        let mut state = ops_room_state();
+        state.push(bob_join());
+        let leave = pdu(
+            events::ROOM_MEMBER,
+            "@bob:gaussian.tech",
+            Some("@bob:gaussian.tech"),
+            r#"{"membership":"leave"}"#,
+        );
+        assert_eq!(check_auth(&leave, &state), Ok(()));
     }
 
     #[test]
