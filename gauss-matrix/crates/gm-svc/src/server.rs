@@ -326,6 +326,11 @@ impl<S: Store + Clone> MessageSender for GaussServer<S> {
             auth_events: Vec::new(),
             content_json: content.to_owned(),
         };
+        // Authorize the event against current room state before accepting it: a
+        // non-member (or insufficiently-powered sender) cannot send.
+        if gm_stateres::auth::check_auth(&pdu, &rooms.current_state_pdus(room)).is_err() {
+            return None;
+        }
         rooms.append(&pdu);
 
         // Record the transaction so a retry is idempotent.
@@ -594,10 +599,51 @@ mod tests {
     }
 
     #[test]
+    fn send_is_authorized_against_room_state() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let mallory = UserId::parse("@mallory:gaussian.tech").unwrap();
+        // Alice creates (and joins) the room.
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+
+        // The joined creator may send.
+        assert!(s
+            .send_message(
+                &alice,
+                &room,
+                events::ROOM_MESSAGE,
+                "t1",
+                r#"{"body":"hi"}"#
+            )
+            .is_some());
+        // A non-member is refused (auth: sender not joined) — nothing appended.
+        assert!(s
+            .send_message(
+                &mallory,
+                &room,
+                events::ROOM_MESSAGE,
+                "t2",
+                r#"{"body":"x"}"#
+            )
+            .is_none());
+        assert!(s
+            .timeline(&room)
+            .iter()
+            .all(|p| p.sender.as_str() != "@mallory:gaussian.tech"));
+    }
+
+    #[test]
     fn send_message_appends_once_and_is_idempotent_on_txn_id() {
         let s = server();
-        let room = RoomId::parse("!r:gaussian.tech").unwrap();
         let sender = UserId::parse("@alice:gaussian.tech").unwrap();
+        let room = s.create_room(&sender, None, None).unwrap(); // sender joins
+
+        let messages = |s: &GaussServer<SharedStore>| {
+            s.timeline(&room)
+                .into_iter()
+                .filter(|p| p.kind == events::ROOM_MESSAGE)
+                .collect::<Vec<_>>()
+        };
 
         let id1 = s
             .send_message(
@@ -619,7 +665,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(id1, retry);
-        assert_eq!(s.timeline(&room).len(), 1);
+        assert_eq!(messages(&s).len(), 1);
 
         // A new txn id produces a new event, linked onto the tip.
         let id2 = s
@@ -632,10 +678,11 @@ mod tests {
             )
             .unwrap();
         assert_ne!(id1, id2);
-        let timeline = s.timeline(&room);
-        assert_eq!(timeline.len(), 2);
-        assert_eq!(timeline[1].prev_events, vec![timeline[0].event_id.clone()]);
-        assert_eq!(timeline[1].content_json, r#"{"body":"yo"}"#);
+        let msgs = messages(&s);
+        assert_eq!(msgs.len(), 2);
+        // The second message links onto the first (the prior tip).
+        assert_eq!(msgs[1].prev_events, vec![msgs[0].event_id.clone()]);
+        assert_eq!(msgs[1].content_json, r#"{"body":"yo"}"#);
     }
 
     #[test]
