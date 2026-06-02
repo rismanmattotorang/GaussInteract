@@ -164,6 +164,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gm-server"
+version = "0.0.1"
+dependencies = [
+ "gm-http",
+ "gm-store",
+ "gm-svc",
+]
+
+[[package]]
 name = "gm-shard"
 version = "0.0.1"
 dependencies = [

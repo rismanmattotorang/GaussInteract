@@ -19,6 +19,7 @@
 pub mod auth;
 pub mod ingress;
 pub mod router;
+pub mod transport;
 
 /// Matrix specification versions GaussMatrix advertises at
 /// `/_matrix/client/versions` (spec §II.A requires ≥ v1.11).

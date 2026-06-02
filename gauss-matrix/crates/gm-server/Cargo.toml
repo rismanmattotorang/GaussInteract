@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026-Present Gaussian Technologies
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "gm-server"
+description = "GaussMatrix homeserver binary: assembles the service core behind the HTTP ingress and listens on a socket."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "gm-server"
+path = "src/main.rs"
+
+[dependencies]
+gm-http = { path = "../gm-http" }
+gm-svc = { path = "../gm-svc" }
+gm-store = { path = "../gm-store" }
