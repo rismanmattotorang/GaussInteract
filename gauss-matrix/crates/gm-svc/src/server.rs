@@ -17,8 +17,9 @@
 use crate::{AccountStore, RoomService, SessionStore};
 use gm_api::events;
 use gm_api::{
-    FederationAuth, FederationReceiver, JoinedRoom, Json, Login, LoginGrant, MessageSender, Pdu,
-    RoomCreator, RoomReader, RoomTimeline, RoomVersion, SyncProvider, SyncView, TokenAuthority,
+    FederationAuth, FederationReceiver, JoinedRoom, Json, Login, LoginGrant, MembershipChanger,
+    MessageSender, Pdu, RoomCreator, RoomReader, RoomTimeline, RoomVersion, SyncProvider, SyncView,
+    TokenAuthority,
 };
 use gm_fed::{auth as fed_auth, Transaction};
 use gm_store::{cf, Store};
@@ -215,6 +216,42 @@ impl<S: Store + Clone> FederationAuth for GaussServer<S> {
         };
         let bytes = fed_auth::signing_bytes(method, uri, &auth.origin, &self.server_name, content);
         fed_auth::verify(&bytes, &auth.signature, &key)
+    }
+}
+
+impl<S: Store + Clone> MembershipChanger for GaussServer<S> {
+    fn change_membership(
+        &self,
+        actor: &UserId,
+        room: &RoomId,
+        target: &UserId,
+        membership: &str,
+    ) -> Option<String> {
+        let mut rooms = RoomService::new(self.store.clone());
+        let (depth, prev_events) = match rooms.timeline(room).last() {
+            Some(tip) => (tip.depth + 1, vec![tip.event_id.clone()]),
+            None => (1, Vec::new()),
+        };
+        let event_id = mint_state_event_id(room, events::ROOM_MEMBER, depth);
+        let pdu = Pdu {
+            event_id: EventId::parse(event_id.clone()).ok()?,
+            room_id: room.clone(),
+            sender: actor.clone(),
+            kind: events::ROOM_MEMBER.to_owned(),
+            state_key: Some(target.as_str().to_owned()),
+            origin_server_ts: now_ms(),
+            depth,
+            prev_events,
+            auth_events: Vec::new(),
+            content_json: single_field("membership", membership),
+        };
+        // Authorize the transition against the join-rules / invite / power-level
+        // state machine before accepting it.
+        if gm_stateres::auth::check_auth(&pdu, &rooms.current_state_pdus(room)).is_err() {
+            return None;
+        }
+        rooms.append(&pdu);
+        Some(event_id)
     }
 }
 
@@ -596,6 +633,46 @@ mod tests {
         assert_eq!(timeline.len(), 1);
         assert_eq!(timeline[0].event_id.as_str(), "$fed1");
         assert_eq!(timeline[0].sender.as_str(), "@bob:other.tld");
+    }
+
+    #[test]
+    fn invite_then_join_lets_a_second_user_participate() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let bob = UserId::parse("@bob:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+
+        // Bob cannot join an invite-only room, nor send, before being invited.
+        assert!(s.change_membership(&bob, &room, &bob, "join").is_none());
+        assert!(s
+            .send_message(&bob, &room, events::ROOM_MESSAGE, "t0", "{}")
+            .is_none());
+
+        // Alice (joined, powered) invites bob; bob then joins and can send.
+        assert!(s.change_membership(&alice, &room, &bob, "invite").is_some());
+        assert!(s.change_membership(&bob, &room, &bob, "join").is_some());
+        assert!(s
+            .send_message(&bob, &room, events::ROOM_MESSAGE, "t1", r#"{"body":"hi"}"#)
+            .is_some());
+
+        // Alice (power 100) can kick bob (power 0); bob can no longer send.
+        assert!(s.change_membership(&alice, &room, &bob, "leave").is_some());
+        assert!(s
+            .send_message(&bob, &room, events::ROOM_MESSAGE, "t2", "{}")
+            .is_none());
+    }
+
+    #[test]
+    fn a_non_member_cannot_invite() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let mallory = UserId::parse("@mallory:gaussian.tech").unwrap();
+        let bob = UserId::parse("@bob:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, None, None).unwrap();
+        // Mallory is not in the room, so cannot invite anyone.
+        assert!(s
+            .change_membership(&mallory, &room, &bob, "invite")
+            .is_none());
     }
 
     #[test]
