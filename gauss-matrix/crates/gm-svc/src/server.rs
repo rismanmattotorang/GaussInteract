@@ -15,7 +15,7 @@
 //! [`gm_store::SharedStore`].
 
 use crate::{AccountStore, RoomService, SessionStore};
-use gm_api::{Login, LoginGrant, MessageSender, Pdu, RoomReader, TokenAuthority};
+use gm_api::{Login, LoginGrant, MessageSender, Pdu, RoomReader, RoomTimeline, TokenAuthority};
 use gm_store::{cf, Store};
 use gm_util::{EventId, RoomId, UserId};
 use std::hash::{Hash, Hasher};
@@ -88,6 +88,12 @@ impl<S: Store + Clone> RoomReader for GaussServer<S> {
         state_key: &str,
     ) -> Option<String> {
         RoomService::new(self.store.clone()).state_event_content(room, event_type, state_key)
+    }
+}
+
+impl<S: Store + Clone> RoomTimeline for GaussServer<S> {
+    fn room_timeline(&self, room: &RoomId) -> Vec<Pdu> {
+        self.timeline(room)
     }
 }
 

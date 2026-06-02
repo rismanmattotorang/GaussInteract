@@ -20,7 +20,9 @@
 //! - `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}[/{stateKey}]` → the
 //!   content of a state event;
 //! - `PUT /_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}` → send a
-//!   message event, returning its event id (idempotent on the transaction id).
+//!   message event, returning its event id (idempotent on the transaction id);
+//! - `GET /_matrix/client/v3/rooms/{roomId}/messages` → the room timeline as a
+//!   `{"chunk":[…]}` page.
 //!
 //! Authentication is gated centrally: a request to an [`Auth::AccessToken`]
 //! endpoint without a token is `401 M_MISSING_TOKEN`, and a token the service
@@ -32,7 +34,7 @@
 use crate::auth::access_token;
 use crate::router::{RouteMatch, RouteResolution, Router};
 use crate::{Auth, Method, SUPPORTED_SPEC_VERSIONS};
-use gm_api::{Homeserver, Json, LoginGrant, MatrixError, NoServer};
+use gm_api::{Homeserver, Json, LoginGrant, MatrixError, NoServer, Pdu};
 use gm_util::{RoomId, UserId};
 use std::collections::BTreeMap;
 
@@ -221,6 +223,7 @@ impl<H: Homeserver> Ingress<H> {
             (Method::Put, "/_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}") => {
                 self.serve_send(m, user, req)
             }
+            (Method::Get, "/_matrix/client/v3/rooms/{roomId}/messages") => self.serve_messages(m),
             _ => Response::error(
                 501,
                 &MatrixError::unrecognized("endpoint not yet implemented"),
@@ -275,6 +278,22 @@ impl<H: Homeserver> Ingress<H> {
                 &MatrixError::forbidden("not permitted to send in this room"),
             ),
         }
+    }
+
+    /// `GET /_matrix/client/v3/rooms/{roomId}/messages`: return the room
+    /// timeline as a `{"chunk":[…],"start":…,"end":…}` page. Pagination tokens
+    /// are placeholders for now; the whole timeline is returned oldest-first.
+    fn serve_messages(&self, m: &RouteMatch) -> Response {
+        let Some(room_id) = m.param("roomId") else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let Ok(room) = RoomId::parse(room_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        Response::json_ok(messages_body(&self.server.room_timeline(&room)))
     }
 
     /// `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}[/{stateKey}]`:
@@ -377,6 +396,18 @@ fn event_id_body(event_id: &str) -> String {
     Json::Object(obj).to_string()
 }
 
+/// The `GET …/messages` body: `{"chunk":[…events…],"start":…,"end":…}`. The
+/// chunk is the room timeline (oldest-first) as event JSON; the tokens are
+/// placeholders until incremental pagination lands.
+fn messages_body(timeline: &[Pdu]) -> String {
+    let chunk = Json::Array(timeline.iter().map(Pdu::to_json).collect());
+    let mut obj = BTreeMap::new();
+    obj.insert("chunk".to_owned(), chunk);
+    obj.insert("start".to_owned(), Json::String("start".to_owned()));
+    obj.insert("end".to_owned(), Json::String("end".to_owned()));
+    Json::Object(obj).to_string()
+}
+
 /// The `POST /_matrix/client/v3/login` success body: `{"user_id":…,
 /// "access_token":…}`.
 fn login_response(grant: &LoginGrant) -> String {
@@ -428,10 +459,10 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_api::{Login, MessageSender, RoomReader, TokenAuthority};
+    use gm_api::{Login, MessageSender, RoomReader, RoomTimeline, TokenAuthority};
     use std::collections::BTreeMap;
 
-    /// A test homeserver: one account/token, and some room state.
+    /// A test homeserver: one account/token, some room state, and a timeline.
     #[derive(Default)]
     struct TestServer {
         token: String,
@@ -439,6 +470,8 @@ mod tests {
         password: String,
         /// (room, event_type, state_key) -> content JSON.
         state: BTreeMap<(String, String, String), String>,
+        /// Events returned by the `/messages` endpoint.
+        timeline: Vec<Pdu>,
     }
     impl TokenAuthority for TestServer {
         fn user_for(&self, token: &str) -> Option<UserId> {
@@ -491,6 +524,11 @@ mod tests {
             Some(format!("$evt_{txn_id}"))
         }
     }
+    impl RoomTimeline for TestServer {
+        fn room_timeline(&self, _room: &RoomId) -> Vec<Pdu> {
+            self.timeline.clone()
+        }
+    }
 
     fn authed() -> Ingress<TestServer> {
         Ingress::with_server(TestServer {
@@ -498,6 +536,7 @@ mod tests {
             user: "@alice:gaussian.tech".to_owned(),
             password: "pw".to_owned(),
             state: BTreeMap::new(),
+            timeline: Vec::new(),
         })
     }
 
@@ -701,6 +740,7 @@ mod tests {
             user: "@alice:gaussian.tech".to_owned(),
             password: "pw".to_owned(),
             state,
+            timeline: Vec::new(),
         })
     }
 
@@ -797,5 +837,82 @@ mod tests {
         let resp = authed().handle(&req);
         assert_eq!(resp.status, 400);
         assert!(resp.body.contains("M_NOT_JSON"));
+    }
+
+    fn message_pdu(id: &str, body: &str) -> Pdu {
+        Pdu {
+            event_id: gm_util::EventId::parse(id).unwrap(),
+            room_id: RoomId::parse("!room:gaussian.tech").unwrap(),
+            sender: UserId::parse("@alice:gaussian.tech").unwrap(),
+            kind: "m.room.message".to_owned(),
+            state_key: None,
+            origin_server_ts: 1,
+            depth: 1,
+            prev_events: Vec::new(),
+            auth_events: Vec::new(),
+            content_json: format!("{{\"body\":\"{body}\"}}"),
+        }
+    }
+
+    fn server_with_timeline() -> Ingress<TestServer> {
+        Ingress::with_server(TestServer {
+            token: "tok123".to_owned(),
+            user: "@alice:gaussian.tech".to_owned(),
+            password: "pw".to_owned(),
+            state: BTreeMap::new(),
+            timeline: vec![message_pdu("$e1", "hello"), message_pdu("$e2", "world")],
+        })
+    }
+
+    #[test]
+    fn messages_returns_the_timeline_as_a_chunk() {
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/messages",
+        )
+        .with_authorization("Bearer tok123");
+        let resp = server_with_timeline().handle(&req);
+        assert_eq!(resp.status, 200);
+        let parsed = Json::parse(&resp.body).unwrap();
+        let chunk = parsed.get("chunk").and_then(Json::as_array).unwrap();
+        assert_eq!(chunk.len(), 2);
+        // Events carry their Matrix JSON shape, oldest first.
+        assert_eq!(chunk[0].get("event_id").and_then(Json::as_str), Some("$e1"));
+        assert_eq!(
+            chunk[1]
+                .get("content")
+                .and_then(|c| c.get("body"))
+                .and_then(Json::as_str),
+            Some("world")
+        );
+        assert!(parsed.get("start").is_some());
+        assert!(parsed.get("end").is_some());
+    }
+
+    #[test]
+    fn messages_requires_authentication() {
+        let resp = server_with_timeline().dispatch(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/messages",
+        );
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
+    }
+
+    #[test]
+    fn messages_for_an_empty_room_is_an_empty_chunk() {
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/messages",
+        )
+        .with_authorization("Bearer tok123");
+        let resp = authed().handle(&req); // authed() has an empty timeline
+        assert_eq!(resp.status, 200);
+        let chunk = Json::parse(&resp.body)
+            .unwrap()
+            .get("chunk")
+            .and_then(Json::as_array)
+            .map(<[_]>::len);
+        assert_eq!(chunk, Some(0));
     }
 }
