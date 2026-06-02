@@ -134,6 +134,7 @@ static SURFACE: &[Endpoint] = &[
         Method::Get,
         "/_matrix/client/v3/rooms/{roomId}/state/{eventType}",
     ),
+    Endpoint::cs(Method::Get, "/_matrix/client/v3/rooms/{roomId}/messages"),
     Endpoint::cs(
         Method::Put,
         "/_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}",

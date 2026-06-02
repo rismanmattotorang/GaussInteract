@@ -135,6 +135,27 @@ fn client_logs_in_then_sends_a_message_idempotently() {
         .unwrap()
         .to_owned();
     assert_ne!(id1, id2);
+
+    // GET /messages returns both sent events as a chunk, oldest first.
+    let messages = ingress.handle(
+        &Request::new(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!ops:gaussian.tech/messages",
+        )
+        .with_authorization(&auth),
+    );
+    assert_eq!(messages.status, 200);
+    let chunk = Json::parse(&messages.body).unwrap();
+    let chunk = chunk.get("chunk").and_then(Json::as_array).unwrap();
+    assert_eq!(chunk.len(), 2);
+    assert_eq!(
+        chunk[0].get("event_id").and_then(Json::as_str),
+        Some(id1.as_str())
+    );
+    assert_eq!(
+        chunk[1].get("event_id").and_then(Json::as_str),
+        Some(id2.as_str())
+    );
 }
 
 #[test]

@@ -13,6 +13,7 @@
 //! homeserver. The assembled server plugs its composed services in as the `H`.
 
 use crate::auth::TokenAuthority;
+use crate::Pdu;
 use gm_util::{RoomId, UserId};
 
 /// Read-only access to room state (the CS state-read / federation state paths).
@@ -25,6 +26,12 @@ pub trait RoomReader {
         event_type: &str,
         state_key: &str,
     ) -> Option<String>;
+}
+
+/// Read-only access to a room's timeline (the CS `/messages` path).
+pub trait RoomTimeline {
+    /// The events of `room`, oldest first.
+    fn room_timeline(&self, room: &RoomId) -> Vec<Pdu>;
 }
 
 /// The result of a successful login: the full user id and a fresh access token.
@@ -69,9 +76,9 @@ pub trait MessageSender {
 
 /// The full capability set the ingress requires of a homeserver. Blanket-
 /// implemented: any type providing all the capability traits is a `Homeserver`.
-pub trait Homeserver: TokenAuthority + RoomReader + Login + MessageSender {}
+pub trait Homeserver: TokenAuthority + RoomReader + RoomTimeline + Login + MessageSender {}
 
-impl<T: TokenAuthority + RoomReader + Login + MessageSender> Homeserver for T {}
+impl<T: TokenAuthority + RoomReader + RoomTimeline + Login + MessageSender> Homeserver for T {}
 
 /// A homeserver that provides nothing — the default for an ingress with no
 /// service core wired in. Public endpoints still work; authenticated endpoints
@@ -93,6 +100,12 @@ impl RoomReader for NoServer {
         _state_key: &str,
     ) -> Option<String> {
         None
+    }
+}
+
+impl RoomTimeline for NoServer {
+    fn room_timeline(&self, _room: &RoomId) -> Vec<Pdu> {
+        Vec::new()
     }
 }
 
