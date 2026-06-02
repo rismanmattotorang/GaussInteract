@@ -34,6 +34,34 @@ pub trait RoomTimeline {
     fn room_timeline(&self, room: &RoomId) -> Vec<Pdu>;
 }
 
+/// One joined room in a [`SyncView`]: its current state and recent timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinedRoom {
+    /// The room.
+    pub room: RoomId,
+    /// The room's current state events.
+    pub state: Vec<Pdu>,
+    /// The room's timeline, oldest first.
+    pub timeline: Vec<Pdu>,
+}
+
+/// A user's sync view: the rooms they have joined, each with state and timeline,
+/// plus the pagination token a subsequent sync resumes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncView {
+    /// The token to pass as `?since=` on the next sync.
+    pub next_batch: String,
+    /// The rooms the user is joined to.
+    pub joined: Vec<JoinedRoom>,
+}
+
+/// Build a user's sync view (the CS `/sync` path).
+pub trait SyncProvider {
+    /// The current sync view for `user` (initial sync: full state + timeline of
+    /// every joined room).
+    fn sync(&self, user: &UserId) -> SyncView;
+}
+
 /// Create a room (the `POST /createRoom` path).
 ///
 /// Takes `&self` for the same reason as [`Login`]: the ingress is a shared
@@ -94,12 +122,18 @@ pub trait MessageSender {
 /// The full capability set the ingress requires of a homeserver. Blanket-
 /// implemented: any type providing all the capability traits is a `Homeserver`.
 pub trait Homeserver:
-    TokenAuthority + RoomReader + RoomTimeline + RoomCreator + Login + MessageSender
+    TokenAuthority + RoomReader + RoomTimeline + RoomCreator + Login + MessageSender + SyncProvider
 {
 }
 
 impl<T> Homeserver for T where
-    T: TokenAuthority + RoomReader + RoomTimeline + RoomCreator + Login + MessageSender
+    T: TokenAuthority
+        + RoomReader
+        + RoomTimeline
+        + RoomCreator
+        + Login
+        + MessageSender
+        + SyncProvider
 {
 }
 
@@ -140,6 +174,15 @@ impl RoomCreator for NoServer {
         _topic: Option<&str>,
     ) -> Option<RoomId> {
         None
+    }
+}
+
+impl SyncProvider for NoServer {
+    fn sync(&self, _user: &UserId) -> SyncView {
+        SyncView {
+            next_batch: "s0".to_owned(),
+            joined: Vec::new(),
+        }
     }
 }
 

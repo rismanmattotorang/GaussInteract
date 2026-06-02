@@ -193,6 +193,35 @@ fn client_logs_in_creates_a_room_then_sends_a_message_idempotently() {
             .and_then(Json::as_str),
         Some("m.room.create")
     );
+
+    // GET /sync shows the joined room with its state and timeline.
+    let sync = ingress
+        .handle(&Request::new(Method::Get, "/_matrix/client/v3/sync").with_authorization(&auth));
+    assert_eq!(sync.status, 200);
+    let synced = Json::parse(&sync.body).unwrap();
+    let joined_room = synced
+        .get("rooms")
+        .and_then(|r| r.get("join"))
+        .and_then(|j| j.get(&room))
+        .expect("alice's joined room");
+    // State includes the room name; timeline includes both messages.
+    let state_has_name = joined_room
+        .get("state")
+        .and_then(|s| s.get("events"))
+        .and_then(Json::as_array)
+        .unwrap()
+        .iter()
+        .any(|e| e.get("type").and_then(Json::as_str) == Some("m.room.name"));
+    assert!(state_has_name);
+    let timeline_msgs = joined_room
+        .get("timeline")
+        .and_then(|t| t.get("events"))
+        .and_then(Json::as_array)
+        .unwrap()
+        .iter()
+        .filter(|e| e.get("type").and_then(Json::as_str) == Some("m.room.message"))
+        .count();
+    assert_eq!(timeline_msgs, 2);
 }
 
 #[test]
