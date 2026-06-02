@@ -79,6 +79,65 @@ fn client_logs_in_then_uses_the_token_for_whoami_and_state() {
 }
 
 #[test]
+fn client_logs_in_then_sends_a_message_idempotently() {
+    let server = GaussServer::new(SharedStore::new(), "gaussian.tech");
+    server.register_account("alice", "hunter2");
+    let ingress = Ingress::with_server(server);
+
+    // Log in to obtain a token.
+    let body = r#"{"type":"m.login.password","identifier":{"type":"m.id.user","user":"alice"},"password":"hunter2"}"#;
+    let login =
+        ingress.handle(&Request::new(Method::Post, "/_matrix/client/v3/login").with_body(body));
+    let token = Json::parse(&login.body)
+        .unwrap()
+        .get("access_token")
+        .and_then(Json::as_str)
+        .unwrap()
+        .to_owned();
+    let auth = format!("Bearer {token}");
+
+    let send = |txn: &str| {
+        let target =
+            format!("/_matrix/client/v3/rooms/!ops:gaussian.tech/send/m.room.message/{txn}");
+        ingress.handle(
+            &Request::new(Method::Put, &target)
+                .with_authorization(&auth)
+                .with_body(r#"{"msgtype":"m.text","body":"hello"}"#),
+        )
+    };
+
+    // First send creates an event.
+    let first = send("txnA");
+    assert_eq!(first.status, 200);
+    let id1 = Json::parse(&first.body)
+        .unwrap()
+        .get("event_id")
+        .and_then(Json::as_str)
+        .unwrap()
+        .to_owned();
+
+    // Retrying the same transaction id returns the same event (idempotent).
+    let retry = send("txnA");
+    assert_eq!(
+        Json::parse(&retry.body)
+            .unwrap()
+            .get("event_id")
+            .and_then(Json::as_str),
+        Some(id1.as_str())
+    );
+
+    // A different transaction id creates a distinct event.
+    let second = send("txnB");
+    let id2 = Json::parse(&second.body)
+        .unwrap()
+        .get("event_id")
+        .and_then(Json::as_str)
+        .unwrap()
+        .to_owned();
+    assert_ne!(id1, id2);
+}
+
+#[test]
 fn wrong_credentials_are_rejected_and_grant_no_access() {
     let server = GaussServer::new(SharedStore::new(), "gaussian.tech");
     server.register_account("alice", "hunter2");

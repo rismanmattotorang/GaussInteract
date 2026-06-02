@@ -46,6 +46,9 @@ pub mod cf {
     pub const ACCESS_TOKENS: &str = "access_tokens";
     /// User accounts → their password verifier (§II.B).
     pub const ACCOUNTS: &str = "accounts";
+    /// Per-sender transaction ids → the event they produced, for idempotent
+    /// retries of `PUT …/send/…/{txnId}` (§II, transaction identifiers).
+    pub const TRANSACTIONS: &str = "transactions";
 }
 
 /// A backend-agnostic, column-family keyed store.
