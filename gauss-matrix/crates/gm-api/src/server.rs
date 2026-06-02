@@ -47,12 +47,31 @@ pub trait Login {
     fn password_login(&self, localpart: &str, password: &str) -> Option<LoginGrant>;
 }
 
-/// The full capability set the ingress requires of a homeserver. Blanket-
-/// implemented: any type that is a [`TokenAuthority`], a [`RoomReader`] and a
-/// [`Login`] provider is a `Homeserver`.
-pub trait Homeserver: TokenAuthority + RoomReader + Login {}
+/// Send a message event into a room (the `PUT …/send/…/{txnId}` path).
+///
+/// Takes `&self` for the same reason as [`Login`]: the ingress is a shared
+/// front and a persisting implementation uses interior mutability. `txn_id`
+/// makes the send idempotent — retrying with the same `(sender, txn_id)` returns
+/// the originally-created event rather than duplicating it.
+pub trait MessageSender {
+    /// Append `content` (an event content JSON object) as an `event_type` event
+    /// sent by `sender` into `room`, returning the new event id. Returns `None`
+    /// if the send is refused. Idempotent on `(sender, txn_id)`.
+    fn send_message(
+        &self,
+        sender: &UserId,
+        room: &RoomId,
+        event_type: &str,
+        txn_id: &str,
+        content: &str,
+    ) -> Option<String>;
+}
 
-impl<T: TokenAuthority + RoomReader + Login> Homeserver for T {}
+/// The full capability set the ingress requires of a homeserver. Blanket-
+/// implemented: any type providing all the capability traits is a `Homeserver`.
+pub trait Homeserver: TokenAuthority + RoomReader + Login + MessageSender {}
+
+impl<T: TokenAuthority + RoomReader + Login + MessageSender> Homeserver for T {}
 
 /// A homeserver that provides nothing — the default for an ingress with no
 /// service core wired in. Public endpoints still work; authenticated endpoints
@@ -79,6 +98,19 @@ impl RoomReader for NoServer {
 
 impl Login for NoServer {
     fn password_login(&self, _localpart: &str, _password: &str) -> Option<LoginGrant> {
+        None
+    }
+}
+
+impl MessageSender for NoServer {
+    fn send_message(
+        &self,
+        _sender: &UserId,
+        _room: &RoomId,
+        _event_type: &str,
+        _txn_id: &str,
+        _content: &str,
+    ) -> Option<String> {
         None
     }
 }

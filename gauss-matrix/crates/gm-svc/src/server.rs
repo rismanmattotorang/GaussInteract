@@ -15,9 +15,14 @@
 //! [`gm_store::SharedStore`].
 
 use crate::{AccountStore, RoomService, SessionStore};
-use gm_api::{Login, LoginGrant, Pdu, RoomReader, TokenAuthority};
-use gm_store::Store;
-use gm_util::{RoomId, UserId};
+use gm_api::{Login, LoginGrant, MessageSender, Pdu, RoomReader, TokenAuthority};
+use gm_store::{cf, Store};
+use gm_util::{EventId, RoomId, UserId};
+use std::hash::{Hash, Hasher};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Delimiter for the `(sender, txn_id)` transaction key.
+const TXN_SEP: char = '\u{1f}';
 
 /// The composed homeserver: one shared store, one server name, all services.
 #[derive(Debug, Clone)]
@@ -51,6 +56,11 @@ impl<S: Store + Clone> GaussServer<S> {
     /// Append an event to a room (setup / federation ingress).
     pub fn append_event(&self, pdu: &Pdu) {
         RoomService::new(self.store.clone()).append(pdu);
+    }
+
+    /// The room's timeline, oldest first.
+    pub fn timeline(&self, room: &RoomId) -> Vec<Pdu> {
+        RoomService::new(self.store.clone()).timeline(room)
     }
 
     /// Resolve a login `user` field — a bare localpart (`alice`) or a full id
@@ -93,6 +103,70 @@ impl<S: Store + Clone> Login for GaussServer<S> {
             access_token,
         })
     }
+}
+
+impl<S: Store + Clone> MessageSender for GaussServer<S> {
+    fn send_message(
+        &self,
+        sender: &UserId,
+        room: &RoomId,
+        event_type: &str,
+        txn_id: &str,
+        content: &str,
+    ) -> Option<String> {
+        // Idempotency: a repeated (sender, txn_id) returns the original event,
+        // never a duplicate (Matrix transaction identifiers).
+        let txn_key = format!("{}{TXN_SEP}{}", sender.as_str(), txn_id);
+        if let Some(existing) = self.store.get(cf::TRANSACTIONS, &txn_key) {
+            return String::from_utf8(existing).ok();
+        }
+
+        let mut rooms = RoomService::new(self.store.clone());
+        // Link the new event onto the current linear tip of the room DAG.
+        let (depth, prev_events) = match rooms.timeline(room).last() {
+            Some(tip) => (tip.depth + 1, vec![tip.event_id.clone()]),
+            None => (1, Vec::new()),
+        };
+        let event_id = mint_event_id(room, sender, txn_id, depth);
+        let pdu = Pdu {
+            event_id: EventId::parse(event_id.clone()).ok()?,
+            room_id: room.clone(),
+            sender: sender.clone(),
+            kind: event_type.to_owned(),
+            state_key: None, // a message event, not state
+            origin_server_ts: now_ms(),
+            depth,
+            prev_events,
+            auth_events: Vec::new(),
+            content_json: content.to_owned(),
+        };
+        rooms.append(&pdu);
+
+        // Record the transaction so a retry is idempotent.
+        let mut store = self.store.clone();
+        store.put(cf::TRANSACTIONS, &txn_key, event_id.as_bytes());
+        Some(event_id)
+    }
+}
+
+/// Milliseconds since the Unix epoch (the event's `origin_server_ts`).
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Derive a (scaffold, deterministic) event id for a send. Production derives
+/// the event id by hashing the event per the room version; this keeps the
+/// dependency-free placeholder consistent with the rest of the scaffold.
+fn mint_event_id(room: &RoomId, sender: &UserId, txn_id: &str, depth: u64) -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    room.as_str().hash(&mut h);
+    sender.as_str().hash(&mut h);
+    txn_id.hash(&mut h);
+    depth.hash(&mut h);
+    format!("${:016x}", h.finish())
 }
 
 #[cfg(test)]
@@ -142,6 +216,51 @@ mod tests {
         assert_ne!(t1, t2);
         assert!(s.user_for(&t1).is_some());
         assert!(s.user_for(&t2).is_some());
+    }
+
+    #[test]
+    fn send_message_appends_once_and_is_idempotent_on_txn_id() {
+        let s = server();
+        let room = RoomId::parse("!r:gaussian.tech").unwrap();
+        let sender = UserId::parse("@alice:gaussian.tech").unwrap();
+
+        let id1 = s
+            .send_message(
+                &sender,
+                &room,
+                events::ROOM_MESSAGE,
+                "txn1",
+                r#"{"body":"hi"}"#,
+            )
+            .unwrap();
+        // A retry with the same txn id returns the original event, no duplicate.
+        let retry = s
+            .send_message(
+                &sender,
+                &room,
+                events::ROOM_MESSAGE,
+                "txn1",
+                r#"{"body":"hi"}"#,
+            )
+            .unwrap();
+        assert_eq!(id1, retry);
+        assert_eq!(s.timeline(&room).len(), 1);
+
+        // A new txn id produces a new event, linked onto the tip.
+        let id2 = s
+            .send_message(
+                &sender,
+                &room,
+                events::ROOM_MESSAGE,
+                "txn2",
+                r#"{"body":"yo"}"#,
+            )
+            .unwrap();
+        assert_ne!(id1, id2);
+        let timeline = s.timeline(&room);
+        assert_eq!(timeline.len(), 2);
+        assert_eq!(timeline[1].prev_events, vec![timeline[0].event_id.clone()]);
+        assert_eq!(timeline[1].content_json, r#"{"body":"yo"}"#);
     }
 
     #[test]

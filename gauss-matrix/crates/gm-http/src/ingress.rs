@@ -15,9 +15,12 @@
 //! state-free endpoints answer):
 //! - `GET /_matrix/client/versions` → the advertised [`SUPPORTED_SPEC_VERSIONS`];
 //! - `GET /_matrix/client/v3/login` → the supported login flows;
+//! - `POST /_matrix/client/v3/login` → password login, returning an access token;
 //! - `GET /_matrix/client/v3/account/whoami` → the token's user;
-//! - `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}` → the
-//!   content of a state event.
+//! - `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}[/{stateKey}]` → the
+//!   content of a state event;
+//! - `PUT /_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}` → send a
+//!   message event, returning its event id (idempotent on the transaction id).
 //!
 //! Authentication is gated centrally: a request to an [`Auth::AccessToken`]
 //! endpoint without a token is `401 M_MISSING_TOKEN`, and a token the service
@@ -215,9 +218,61 @@ impl<H: Homeserver> Ingress<H> {
             | (Method::Get, "/_matrix/client/v3/rooms/{roomId}/state/{eventType}") => {
                 self.serve_state_event(m)
             }
+            (Method::Put, "/_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}") => {
+                self.serve_send(m, user, req)
+            }
             _ => Response::error(
                 501,
                 &MatrixError::unrecognized("endpoint not yet implemented"),
+            ),
+        }
+    }
+
+    /// `PUT /_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}`: send a
+    /// message event on behalf of the authenticated user, returning its event
+    /// id. The body must be a JSON object (the event content). Idempotent on the
+    /// transaction id.
+    fn serve_send(&self, m: &RouteMatch, user: Option<&UserId>, req: &Request<'_>) -> Response {
+        // The auth gate guarantees a user for this access-token endpoint.
+        let Some(sender) = user else {
+            return Response::error(
+                401,
+                &MatrixError::unknown_token("unrecognized access token"),
+            );
+        };
+        let (Some(room_id), Some(event_type), Some(txn_id)) =
+            (m.param("roomId"), m.param("eventType"), m.param("txnId"))
+        else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let Ok(room) = RoomId::parse(room_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        // The body must be a JSON object (the event content).
+        let body = req.body.unwrap_or("");
+        match Json::parse(body) {
+            Ok(Json::Object(_)) => {}
+            Ok(_) => {
+                return Response::error(
+                    400,
+                    &MatrixError::new("M_BAD_JSON", "content must be an object"),
+                )
+            }
+            Err(_) => {
+                return Response::error(400, &MatrixError::new("M_NOT_JSON", "content is not JSON"))
+            }
+        }
+        match self
+            .server
+            .send_message(sender, &room, event_type, txn_id, body)
+        {
+            Some(event_id) => Response::json_ok(event_id_body(&event_id)),
+            None => Response::error(
+                403,
+                &MatrixError::forbidden("not permitted to send in this room"),
             ),
         }
     }
@@ -315,6 +370,13 @@ fn whoami_body(user: &UserId) -> String {
     format!("{{\"user_id\":\"{}\"}}", json_escape(user.as_str()))
 }
 
+/// The `PUT …/send/…` success body: `{"event_id":…}`.
+fn event_id_body(event_id: &str) -> String {
+    let mut obj = BTreeMap::new();
+    obj.insert("event_id".to_owned(), Json::String(event_id.to_owned()));
+    Json::Object(obj).to_string()
+}
+
 /// The `POST /_matrix/client/v3/login` success body: `{"user_id":…,
 /// "access_token":…}`.
 fn login_response(grant: &LoginGrant) -> String {
@@ -366,7 +428,7 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_api::{Login, RoomReader, TokenAuthority};
+    use gm_api::{Login, MessageSender, RoomReader, TokenAuthority};
     use std::collections::BTreeMap;
 
     /// A test homeserver: one account/token, and some room state.
@@ -414,6 +476,19 @@ mod tests {
             } else {
                 None
             }
+        }
+    }
+    impl MessageSender for TestServer {
+        fn send_message(
+            &self,
+            _sender: &UserId,
+            _room: &RoomId,
+            _event_type: &str,
+            txn_id: &str,
+            _content: &str,
+        ) -> Option<String> {
+            // The double echoes a deterministic event id keyed by the txn.
+            Some(format!("$evt_{txn_id}"))
         }
     }
 
@@ -674,5 +749,53 @@ mod tests {
         );
         assert_eq!(resp.status, 401);
         assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
+    }
+
+    const SEND_TARGET: &str =
+        "/_matrix/client/v3/rooms/!room:gaussian.tech/send/m.room.message/txn7";
+
+    #[test]
+    fn send_with_object_body_returns_an_event_id() {
+        let req = Request::new(Method::Put, SEND_TARGET)
+            .with_authorization("Bearer tok123")
+            .with_body(r#"{"msgtype":"m.text","body":"hi"}"#);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        // The double keys the event id by the txn id from the path.
+        assert_eq!(
+            Json::parse(&resp.body)
+                .unwrap()
+                .get("event_id")
+                .and_then(Json::as_str),
+            Some("$evt_txn7")
+        );
+    }
+
+    #[test]
+    fn send_without_a_token_is_401() {
+        let req = Request::new(Method::Put, SEND_TARGET).with_body("{}");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
+    }
+
+    #[test]
+    fn send_with_a_non_object_body_is_400() {
+        let req = Request::new(Method::Put, SEND_TARGET)
+            .with_authorization("Bearer tok123")
+            .with_body("[1,2,3]");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("M_BAD_JSON"));
+    }
+
+    #[test]
+    fn send_with_invalid_json_is_400_not_json() {
+        let req = Request::new(Method::Put, SEND_TARGET)
+            .with_authorization("Bearer tok123")
+            .with_body("{not json");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("M_NOT_JSON"));
     }
 }
