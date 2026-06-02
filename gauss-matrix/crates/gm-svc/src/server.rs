@@ -15,9 +15,14 @@
 //! [`gm_store::SharedStore`].
 
 use crate::{AccountStore, RoomService, SessionStore};
-use gm_api::{Login, LoginGrant, MessageSender, Pdu, RoomReader, RoomTimeline, TokenAuthority};
+use gm_api::events;
+use gm_api::{
+    Json, Login, LoginGrant, MessageSender, Pdu, RoomCreator, RoomReader, RoomTimeline,
+    RoomVersion, TokenAuthority,
+};
 use gm_store::{cf, Store};
 use gm_util::{EventId, RoomId, UserId};
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -63,6 +68,16 @@ impl<S: Store + Clone> GaussServer<S> {
         RoomService::new(self.store.clone()).timeline(room)
     }
 
+    /// Mint a fresh room id on this server. Uniqueness (scaffold) comes from the
+    /// creator, the live event count and the clock; production uses a CSPRNG.
+    fn mint_room_id(&self, creator: &UserId) -> Option<RoomId> {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        creator.as_str().hash(&mut h);
+        self.store.count(cf::EVENTS).hash(&mut h);
+        now_ms().hash(&mut h);
+        RoomId::parse(format!("!{:016x}:{}", h.finish(), self.server_name)).ok()
+    }
+
     /// Resolve a login `user` field — a bare localpart (`alice`) or a full id
     /// (`@alice:server`) — to a validated [`UserId`] on this server.
     fn full_user_id(&self, user: &str) -> Option<UserId> {
@@ -94,6 +109,65 @@ impl<S: Store + Clone> RoomReader for GaussServer<S> {
 impl<S: Store + Clone> RoomTimeline for GaussServer<S> {
     fn room_timeline(&self, room: &RoomId) -> Vec<Pdu> {
         self.timeline(room)
+    }
+}
+
+impl<S: Store + Clone> RoomCreator for GaussServer<S> {
+    fn create_room(
+        &self,
+        creator: &UserId,
+        name: Option<&str>,
+        topic: Option<&str>,
+    ) -> Option<RoomId> {
+        let room = self.mint_room_id(creator)?;
+
+        // The canonical initial state of a new room, in order: create,
+        // the creator's join, power levels, then the optional name/topic.
+        let mut events: Vec<(&'static str, String, String)> = vec![
+            (events::ROOM_CREATE, String::new(), create_content(creator)),
+            (
+                events::ROOM_MEMBER,
+                creator.as_str().to_owned(),
+                member_join_content(),
+            ),
+            (
+                events::ROOM_POWER_LEVELS,
+                String::new(),
+                power_levels_content(creator),
+            ),
+        ];
+        if let Some(name) = name {
+            events.push((events::ROOM_NAME, String::new(), single_field("name", name)));
+        }
+        if let Some(topic) = topic {
+            events.push((
+                events::ROOM_TOPIC,
+                String::new(),
+                single_field("topic", topic),
+            ));
+        }
+
+        let mut rooms = RoomService::new(self.store.clone());
+        let mut prev_events: Vec<EventId> = Vec::new();
+        for (i, (kind, state_key, content)) in events.into_iter().enumerate() {
+            let depth = i as u64 + 1;
+            let event_id = EventId::parse(mint_state_event_id(&room, kind, depth)).ok()?;
+            let pdu = Pdu {
+                event_id: event_id.clone(),
+                room_id: room.clone(),
+                sender: creator.clone(),
+                kind: kind.to_owned(),
+                state_key: Some(state_key),
+                origin_server_ts: now_ms(),
+                depth,
+                prev_events,
+                auth_events: Vec::new(),
+                content_json: content,
+            };
+            rooms.append(&pdu);
+            prev_events = vec![event_id];
+        }
+        Some(room)
     }
 }
 
@@ -175,6 +249,51 @@ fn mint_event_id(room: &RoomId, sender: &UserId, txn_id: &str, depth: u64) -> St
     format!("${:016x}", h.finish())
 }
 
+/// Derive a (scaffold) event id for a created room's initial state event.
+fn mint_state_event_id(room: &RoomId, kind: &str, depth: u64) -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    room.as_str().hash(&mut h);
+    kind.hash(&mut h);
+    depth.hash(&mut h);
+    format!("${:016x}", h.finish())
+}
+
+/// `m.room.create` content: the creator and the room version.
+fn create_content(creator: &UserId) -> String {
+    let mut o = BTreeMap::new();
+    o.insert(
+        "creator".to_owned(),
+        Json::String(creator.as_str().to_owned()),
+    );
+    o.insert(
+        "room_version".to_owned(),
+        Json::String(RoomVersion::MAX_SUPPORTED.to_string()),
+    );
+    Json::Object(o).to_string()
+}
+
+/// `m.room.member` content for a join.
+fn member_join_content() -> String {
+    single_field("membership", "join")
+}
+
+/// `m.room.power_levels` content granting the creator full power.
+fn power_levels_content(creator: &UserId) -> String {
+    let mut users = BTreeMap::new();
+    users.insert(creator.as_str().to_owned(), Json::Number(100.0));
+    let mut o = BTreeMap::new();
+    o.insert("users".to_owned(), Json::Object(users));
+    o.insert("users_default".to_owned(), Json::Number(0.0));
+    Json::Object(o).to_string()
+}
+
+/// A one-field object, e.g. `{"name":"Ops"}`.
+fn single_field(field: &str, value: &str) -> String {
+    let mut o = BTreeMap::new();
+    o.insert(field.to_owned(), Json::String(value.to_owned()));
+    Json::Object(o).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +341,54 @@ mod tests {
         assert_ne!(t1, t2);
         assert!(s.user_for(&t1).is_some());
         assert!(s.user_for(&t2).is_some());
+    }
+
+    #[test]
+    fn create_room_writes_the_canonical_initial_state() {
+        let s = server();
+        let creator = UserId::parse("@alice:gaussian.tech").unwrap();
+        let room = s
+            .create_room(&creator, Some("Ops"), Some("On-call"))
+            .expect("room created");
+        assert!(room.as_str().starts_with("!"));
+        assert!(room.as_str().ends_with(":gaussian.tech"));
+
+        // create + member + power_levels + name + topic, linked in a chain.
+        let timeline = s.timeline(&room);
+        assert_eq!(timeline.len(), 5);
+        assert_eq!(timeline[0].kind, events::ROOM_CREATE);
+        assert_eq!(timeline[1].kind, events::ROOM_MEMBER);
+        assert_eq!(timeline[1].state_key.as_deref(), Some(creator.as_str()));
+        assert_eq!(timeline[2].kind, events::ROOM_POWER_LEVELS);
+        assert_eq!(timeline[1].prev_events, vec![timeline[0].event_id.clone()]);
+
+        // The state map is readable: the creator has joined and name is set.
+        assert_eq!(
+            s.room_state_content(&room, events::ROOM_NAME, ""),
+            Some(r#"{"name":"Ops"}"#.to_owned())
+        );
+        let member = s
+            .room_state_content(&room, events::ROOM_MEMBER, creator.as_str())
+            .unwrap();
+        assert!(member.contains("\"membership\":\"join\""));
+    }
+
+    #[test]
+    fn create_room_without_name_or_topic_writes_three_events() {
+        let s = server();
+        let creator = UserId::parse("@bob:gaussian.tech").unwrap();
+        let room = s.create_room(&creator, None, None).unwrap();
+        assert_eq!(s.timeline(&room).len(), 3); // create + member + power_levels
+        assert_eq!(s.room_state_content(&room, events::ROOM_NAME, ""), None);
+    }
+
+    #[test]
+    fn distinct_create_calls_make_distinct_rooms() {
+        let s = server();
+        let creator = UserId::parse("@alice:gaussian.tech").unwrap();
+        let r1 = s.create_room(&creator, None, None).unwrap();
+        let r2 = s.create_room(&creator, None, None).unwrap();
+        assert_ne!(r1, r2);
     }
 
     #[test]

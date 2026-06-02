@@ -79,7 +79,7 @@ fn client_logs_in_then_uses_the_token_for_whoami_and_state() {
 }
 
 #[test]
-fn client_logs_in_then_sends_a_message_idempotently() {
+fn client_logs_in_creates_a_room_then_sends_a_message_idempotently() {
     let server = GaussServer::new(SharedStore::new(), "gaussian.tech");
     server.register_account("alice", "hunter2");
     let ingress = Ingress::with_server(server);
@@ -96,9 +96,39 @@ fn client_logs_in_then_sends_a_message_idempotently() {
         .to_owned();
     let auth = format!("Bearer {token}");
 
+    // Create a room through the API; the response carries the new room id.
+    let created = ingress.handle(
+        &Request::new(Method::Post, "/_matrix/client/v3/createRoom")
+            .with_authorization(&auth)
+            .with_body(r#"{"name":"Operations"}"#),
+    );
+    assert_eq!(created.status, 200);
+    let room = Json::parse(&created.body)
+        .unwrap()
+        .get("room_id")
+        .and_then(Json::as_str)
+        .unwrap()
+        .to_owned();
+
+    // The created room's name is immediately readable as state.
+    let name = ingress.handle(
+        &Request::new(
+            Method::Get,
+            &format!("/_matrix/client/v3/rooms/{room}/state/m.room.name"),
+        )
+        .with_authorization(&auth),
+    );
+    assert_eq!(name.status, 200);
+    assert_eq!(
+        Json::parse(&name.body)
+            .unwrap()
+            .get("name")
+            .and_then(Json::as_str),
+        Some("Operations")
+    );
+
     let send = |txn: &str| {
-        let target =
-            format!("/_matrix/client/v3/rooms/!ops:gaussian.tech/send/m.room.message/{txn}");
+        let target = format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/{txn}");
         ingress.handle(
             &Request::new(Method::Put, &target)
                 .with_authorization(&auth)
@@ -136,25 +166,32 @@ fn client_logs_in_then_sends_a_message_idempotently() {
         .to_owned();
     assert_ne!(id1, id2);
 
-    // GET /messages returns both sent events as a chunk, oldest first.
+    // GET /messages returns the whole timeline (creation state + both messages),
+    // oldest first.
     let messages = ingress.handle(
         &Request::new(
             Method::Get,
-            "/_matrix/client/v3/rooms/!ops:gaussian.tech/messages",
+            &format!("/_matrix/client/v3/rooms/{room}/messages"),
         )
         .with_authorization(&auth),
     );
     assert_eq!(messages.status, 200);
-    let chunk = Json::parse(&messages.body).unwrap();
-    let chunk = chunk.get("chunk").and_then(Json::as_array).unwrap();
-    assert_eq!(chunk.len(), 2);
+    let body = Json::parse(&messages.body).unwrap();
+    let chunk = body.get("chunk").and_then(Json::as_array).unwrap();
+    // The two m.room.message events are the most recent, in send order.
+    let message_ids: Vec<&str> = chunk
+        .iter()
+        .filter(|e| e.get("type").and_then(Json::as_str) == Some("m.room.message"))
+        .filter_map(|e| e.get("event_id").and_then(Json::as_str))
+        .collect();
+    assert_eq!(message_ids, vec![id1.as_str(), id2.as_str()]);
+    // The room began with its create event.
     assert_eq!(
-        chunk[0].get("event_id").and_then(Json::as_str),
-        Some(id1.as_str())
-    );
-    assert_eq!(
-        chunk[1].get("event_id").and_then(Json::as_str),
-        Some(id2.as_str())
+        chunk
+            .first()
+            .and_then(|e| e.get("type"))
+            .and_then(Json::as_str),
+        Some("m.room.create")
     );
 }
 

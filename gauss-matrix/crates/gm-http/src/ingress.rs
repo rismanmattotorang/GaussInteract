@@ -224,6 +224,7 @@ impl<H: Homeserver> Ingress<H> {
                 self.serve_send(m, user, req)
             }
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/messages") => self.serve_messages(m),
+            (Method::Post, "/_matrix/client/v3/createRoom") => self.serve_create_room(user, req),
             _ => Response::error(
                 501,
                 &MatrixError::unrecognized("endpoint not yet implemented"),
@@ -277,6 +278,47 @@ impl<H: Homeserver> Ingress<H> {
                 403,
                 &MatrixError::forbidden("not permitted to send in this room"),
             ),
+        }
+    }
+
+    /// `POST /_matrix/client/v3/createRoom`: create a room for the authenticated
+    /// user, returning `{"room_id":…}`. Reads optional `name`/`topic` from the
+    /// body; an empty body is allowed, a non-object body is `400`.
+    fn serve_create_room(&self, user: Option<&UserId>, req: &Request<'_>) -> Response {
+        let Some(creator) = user else {
+            return Response::error(
+                401,
+                &MatrixError::unknown_token("unrecognized access token"),
+            );
+        };
+        // The body is optional; when present it must be a JSON object.
+        let (name, topic) = match req.body {
+            None | Some("") => (None, None),
+            Some(body) => match Json::parse(body) {
+                Ok(obj @ Json::Object(_)) => (
+                    obj.get("name").and_then(Json::as_str).map(str::to_owned),
+                    obj.get("topic").and_then(Json::as_str).map(str::to_owned),
+                ),
+                Ok(_) => {
+                    return Response::error(
+                        400,
+                        &MatrixError::new("M_BAD_JSON", "request body must be an object"),
+                    )
+                }
+                Err(_) => {
+                    return Response::error(
+                        400,
+                        &MatrixError::new("M_NOT_JSON", "body is not JSON"),
+                    )
+                }
+            },
+        };
+        match self
+            .server
+            .create_room(creator, name.as_deref(), topic.as_deref())
+        {
+            Some(room) => Response::json_ok(room_id_body(room.as_str())),
+            None => Response::error(403, &MatrixError::forbidden("room creation refused")),
         }
     }
 
@@ -396,6 +438,13 @@ fn event_id_body(event_id: &str) -> String {
     Json::Object(obj).to_string()
 }
 
+/// The `POST /createRoom` success body: `{"room_id":…}`.
+fn room_id_body(room_id: &str) -> String {
+    let mut obj = BTreeMap::new();
+    obj.insert("room_id".to_owned(), Json::String(room_id.to_owned()));
+    Json::Object(obj).to_string()
+}
+
 /// The `GET …/messages` body: `{"chunk":[…events…],"start":…,"end":…}`. The
 /// chunk is the room timeline (oldest-first) as event JSON; the tokens are
 /// placeholders until incremental pagination lands.
@@ -459,7 +508,7 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_api::{Login, MessageSender, RoomReader, RoomTimeline, TokenAuthority};
+    use gm_api::{Login, MessageSender, RoomCreator, RoomReader, RoomTimeline, TokenAuthority};
     use std::collections::BTreeMap;
 
     /// A test homeserver: one account/token, some room state, and a timeline.
@@ -527,6 +576,18 @@ mod tests {
     impl RoomTimeline for TestServer {
         fn room_timeline(&self, _room: &RoomId) -> Vec<Pdu> {
             self.timeline.clone()
+        }
+    }
+    impl RoomCreator for TestServer {
+        fn create_room(
+            &self,
+            _creator: &UserId,
+            name: Option<&str>,
+            _topic: Option<&str>,
+        ) -> Option<RoomId> {
+            // The double echoes a room id derived from the optional name.
+            let local = name.unwrap_or("new");
+            RoomId::parse(format!("!{local}:gaussian.tech")).ok()
         }
     }
 
@@ -897,6 +958,47 @@ mod tests {
         );
         assert_eq!(resp.status, 401);
         assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
+    }
+
+    #[test]
+    fn create_room_returns_a_room_id() {
+        let req = Request::new(Method::Post, "/_matrix/client/v3/createRoom")
+            .with_authorization("Bearer tok123")
+            .with_body(r#"{"name":"ops"}"#);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        assert_eq!(
+            Json::parse(&resp.body)
+                .unwrap()
+                .get("room_id")
+                .and_then(Json::as_str),
+            Some("!ops:gaussian.tech")
+        );
+    }
+
+    #[test]
+    fn create_room_with_empty_body_is_allowed() {
+        // No body at all: the optional name/topic are simply absent.
+        let req = Request::new(Method::Post, "/_matrix/client/v3/createRoom")
+            .with_authorization("Bearer tok123");
+        assert_eq!(authed().handle(&req).status, 200);
+    }
+
+    #[test]
+    fn create_room_requires_authentication() {
+        let resp = authed().dispatch(Method::Post, "/_matrix/client/v3/createRoom");
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
+    }
+
+    #[test]
+    fn create_room_with_a_non_object_body_is_400() {
+        let req = Request::new(Method::Post, "/_matrix/client/v3/createRoom")
+            .with_authorization("Bearer tok123")
+            .with_body("\"oops\"");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("M_BAD_JSON"));
     }
 
     #[test]

@@ -125,6 +125,7 @@ static SURFACE: &[Endpoint] = &[
     Endpoint::cs_public(Method::Post, "/_matrix/client/v3/login"),
     // Client–Server (access-token authenticated)
     Endpoint::cs(Method::Get, "/_matrix/client/v3/account/whoami"),
+    Endpoint::cs(Method::Post, "/_matrix/client/v3/createRoom"),
     Endpoint::cs(Method::Get, "/_matrix/client/v3/sync"),
     Endpoint::cs(
         Method::Get,
