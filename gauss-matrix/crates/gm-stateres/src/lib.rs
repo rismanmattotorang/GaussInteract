@@ -34,6 +34,8 @@
 #![warn(missing_docs)]
 #![deny(rust_2018_idioms)]
 
+pub mod auth;
+
 use gm_api::Pdu;
 use gm_util::EventId;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
