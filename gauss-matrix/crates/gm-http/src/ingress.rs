@@ -22,7 +22,9 @@
 //! - `PUT /_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}` → send a
 //!   message event, returning its event id (idempotent on the transaction id);
 //! - `GET /_matrix/client/v3/rooms/{roomId}/messages` → the room timeline as a
-//!   `{"chunk":[…]}` page.
+//!   `{"chunk":[…]}` page;
+//! - `POST /_matrix/client/v3/createRoom` → originate a room, returning its id;
+//! - `GET /_matrix/client/v3/sync` → the joined rooms with state and timeline.
 //!
 //! Authentication is gated centrally: a request to an [`Auth::AccessToken`]
 //! endpoint without a token is `401 M_MISSING_TOKEN`, and a token the service
@@ -34,7 +36,7 @@
 use crate::auth::access_token;
 use crate::router::{RouteMatch, RouteResolution, Router};
 use crate::{Auth, Method, SUPPORTED_SPEC_VERSIONS};
-use gm_api::{Homeserver, Json, LoginGrant, MatrixError, NoServer, Pdu};
+use gm_api::{Homeserver, Json, LoginGrant, MatrixError, NoServer, Pdu, SyncView};
 use gm_util::{RoomId, UserId};
 use std::collections::BTreeMap;
 
@@ -225,6 +227,7 @@ impl<H: Homeserver> Ingress<H> {
             }
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/messages") => self.serve_messages(m),
             (Method::Post, "/_matrix/client/v3/createRoom") => self.serve_create_room(user, req),
+            (Method::Get, "/_matrix/client/v3/sync") => self.serve_sync(user),
             _ => Response::error(
                 501,
                 &MatrixError::unrecognized("endpoint not yet implemented"),
@@ -320,6 +323,20 @@ impl<H: Homeserver> Ingress<H> {
             Some(room) => Response::json_ok(room_id_body(room.as_str())),
             None => Response::error(403, &MatrixError::forbidden("room creation refused")),
         }
+    }
+
+    /// `GET /_matrix/client/v3/sync`: the authenticated user's joined rooms, each
+    /// with current state and timeline, plus the `next_batch` token. This is
+    /// initial sync — the full view; incremental deltas (`?since=`) are a later
+    /// refinement.
+    fn serve_sync(&self, user: Option<&UserId>) -> Response {
+        let Some(user) = user else {
+            return Response::error(
+                401,
+                &MatrixError::unknown_token("unrecognized access token"),
+            );
+        };
+        Response::json_ok(sync_body(&self.server.sync(user)))
     }
 
     /// `GET /_matrix/client/v3/rooms/{roomId}/messages`: return the room
@@ -445,6 +462,40 @@ fn room_id_body(room_id: &str) -> String {
     Json::Object(obj).to_string()
 }
 
+/// The `GET /sync` body:
+/// `{"next_batch":…,"rooms":{"join":{room:{"state":{"events":[…]},
+/// "timeline":{"events":[…],"limited":false}}}}}`.
+fn sync_body(view: &SyncView) -> String {
+    let events_obj = |events: &[Pdu]| {
+        let mut o = BTreeMap::new();
+        o.insert(
+            "events".to_owned(),
+            Json::Array(events.iter().map(Pdu::to_json).collect()),
+        );
+        o
+    };
+
+    let mut join = BTreeMap::new();
+    for jr in &view.joined {
+        let mut timeline = events_obj(&jr.timeline);
+        timeline.insert("limited".to_owned(), Json::Bool(false));
+        let mut room = BTreeMap::new();
+        room.insert("state".to_owned(), Json::Object(events_obj(&jr.state)));
+        room.insert("timeline".to_owned(), Json::Object(timeline));
+        join.insert(jr.room.as_str().to_owned(), Json::Object(room));
+    }
+
+    let mut rooms = BTreeMap::new();
+    rooms.insert("join".to_owned(), Json::Object(join));
+    let mut top = BTreeMap::new();
+    top.insert(
+        "next_batch".to_owned(),
+        Json::String(view.next_batch.clone()),
+    );
+    top.insert("rooms".to_owned(), Json::Object(rooms));
+    Json::Object(top).to_string()
+}
+
 /// The `GET …/messages` body: `{"chunk":[…events…],"start":…,"end":…}`. The
 /// chunk is the room timeline (oldest-first) as event JSON; the tokens are
 /// placeholders until incremental pagination lands.
@@ -508,7 +559,10 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_api::{Login, MessageSender, RoomCreator, RoomReader, RoomTimeline, TokenAuthority};
+    use gm_api::{
+        JoinedRoom, Login, MessageSender, RoomCreator, RoomReader, RoomTimeline, SyncProvider,
+        TokenAuthority,
+    };
     use std::collections::BTreeMap;
 
     /// A test homeserver: one account/token, some room state, and a timeline.
@@ -590,6 +644,24 @@ mod tests {
             RoomId::parse(format!("!{local}:gaussian.tech")).ok()
         }
     }
+    impl SyncProvider for TestServer {
+        fn sync(&self, _user: &UserId) -> gm_api::SyncView {
+            // One joined room carrying the double's timeline (no state).
+            let joined = if self.timeline.is_empty() {
+                Vec::new()
+            } else {
+                vec![JoinedRoom {
+                    room: RoomId::parse("!room:gaussian.tech").unwrap(),
+                    state: Vec::new(),
+                    timeline: self.timeline.clone(),
+                }]
+            };
+            gm_api::SyncView {
+                next_batch: "s1".to_owned(),
+                joined,
+            }
+        }
+    }
 
     fn authed() -> Ingress<TestServer> {
         Ingress::with_server(TestServer {
@@ -660,17 +732,17 @@ mod tests {
 
     #[test]
     fn a_recognised_token_passes_the_gate() {
-        // With an authority that knows the token, the gate passes; /sync is on
-        // the surface but not yet wired, so it reaches the 501 contract.
+        // With an authority that knows the token, the gate passes and /sync is
+        // served (200) rather than rejected with a 401.
         let req = Request::new(Method::Get, "/_matrix/client/v3/sync")
             .with_authorization("Bearer tok123");
-        assert_eq!(authed().handle(&req).status, 501);
+        assert_eq!(authed().handle(&req).status, 200);
     }
 
     #[test]
     fn token_via_query_parameter_also_passes_the_gate() {
         let resp = authed().dispatch(Method::Get, "/_matrix/client/v3/sync?access_token=tok123");
-        assert_eq!(resp.status, 501); // gate passed, handler not yet wired
+        assert_eq!(resp.status, 200); // gate passed via the query-param token
     }
 
     #[test]
@@ -999,6 +1071,53 @@ mod tests {
         let resp = authed().handle(&req);
         assert_eq!(resp.status, 400);
         assert!(resp.body.contains("M_BAD_JSON"));
+    }
+
+    #[test]
+    fn sync_requires_authentication() {
+        let resp = authed().dispatch(Method::Get, "/_matrix/client/v3/sync");
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
+    }
+
+    #[test]
+    fn sync_returns_joined_rooms_with_a_timeline() {
+        let req = Request::new(Method::Get, "/_matrix/client/v3/sync")
+            .with_authorization("Bearer tok123");
+        let resp = server_with_timeline().handle(&req);
+        assert_eq!(resp.status, 200);
+        let body = Json::parse(&resp.body).unwrap();
+        assert!(body.get("next_batch").and_then(Json::as_str).is_some());
+        let room = body
+            .get("rooms")
+            .and_then(|r| r.get("join"))
+            .and_then(|j| j.get("!room:gaussian.tech"))
+            .expect("the joined room");
+        let events = room
+            .get("timeline")
+            .and_then(|t| t.get("events"))
+            .and_then(Json::as_array)
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].get("event_id").and_then(Json::as_str),
+            Some("$e1")
+        );
+    }
+
+    #[test]
+    fn sync_with_no_joined_rooms_is_an_empty_join_map() {
+        let req = Request::new(Method::Get, "/_matrix/client/v3/sync")
+            .with_authorization("Bearer tok123");
+        let resp = authed().handle(&req); // empty timeline -> no joined rooms
+        assert_eq!(resp.status, 200);
+        let join = Json::parse(&resp.body)
+            .unwrap()
+            .get("rooms")
+            .and_then(|r| r.get("join"))
+            .and_then(Json::as_object)
+            .map(|o| o.len());
+        assert_eq!(join, Some(0));
     }
 
     #[test]

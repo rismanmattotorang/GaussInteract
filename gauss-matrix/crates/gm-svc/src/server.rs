@@ -17,8 +17,8 @@
 use crate::{AccountStore, RoomService, SessionStore};
 use gm_api::events;
 use gm_api::{
-    Json, Login, LoginGrant, MessageSender, Pdu, RoomCreator, RoomReader, RoomTimeline,
-    RoomVersion, TokenAuthority,
+    JoinedRoom, Json, Login, LoginGrant, MessageSender, Pdu, RoomCreator, RoomReader, RoomTimeline,
+    RoomVersion, SyncProvider, SyncView, TokenAuthority,
 };
 use gm_store::{cf, Store};
 use gm_util::{EventId, RoomId, UserId};
@@ -68,6 +68,23 @@ impl<S: Store + Clone> GaussServer<S> {
         RoomService::new(self.store.clone()).timeline(room)
     }
 
+    /// Whether `user`'s current `m.room.member` state in `room` is `join`.
+    fn is_joined(&self, rooms: &RoomService<S>, room: &RoomId, user: &UserId) -> bool {
+        let Some(content) = rooms.state_event_content(room, events::ROOM_MEMBER, user.as_str())
+        else {
+            return false;
+        };
+        Json::parse(&content)
+            .ok()
+            .and_then(|c| {
+                c.get("membership")
+                    .and_then(Json::as_str)
+                    .map(str::to_owned)
+            })
+            .as_deref()
+            == Some("join")
+    }
+
     /// Mint a fresh room id on this server. Uniqueness (scaffold) comes from the
     /// creator, the live event count and the clock; production uses a CSPRNG.
     fn mint_room_id(&self, creator: &UserId) -> Option<RoomId> {
@@ -109,6 +126,28 @@ impl<S: Store + Clone> RoomReader for GaussServer<S> {
 impl<S: Store + Clone> RoomTimeline for GaussServer<S> {
     fn room_timeline(&self, room: &RoomId) -> Vec<Pdu> {
         self.timeline(room)
+    }
+}
+
+impl<S: Store + Clone> SyncProvider for GaussServer<S> {
+    fn sync(&self, user: &UserId) -> SyncView {
+        let rooms = RoomService::new(self.store.clone());
+        let joined = rooms
+            .rooms()
+            .into_iter()
+            .filter(|room| self.is_joined(&rooms, room, user))
+            .map(|room| JoinedRoom {
+                state: rooms.current_state_pdus(&room),
+                timeline: rooms.timeline(&room),
+                room,
+            })
+            .collect();
+        // The token is a coarse cursor over the event log; incremental sync
+        // (deltas since the token) is a later refinement — this is initial sync.
+        SyncView {
+            next_batch: format!("s{}", self.store.count(cf::EVENTS)),
+            joined,
+        }
     }
 }
 
@@ -389,6 +428,36 @@ mod tests {
         let r1 = s.create_room(&creator, None, None).unwrap();
         let r2 = s.create_room(&creator, None, None).unwrap();
         assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn sync_reports_joined_rooms_with_state_and_timeline() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let bob = UserId::parse("@bob:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+        s.send_message(
+            &alice,
+            &room,
+            events::ROOM_MESSAGE,
+            "t1",
+            r#"{"body":"hi"}"#,
+        )
+        .unwrap();
+
+        // Alice (the creator, joined) sees the room; Bob (not a member) does not.
+        let view = s.sync(&alice);
+        assert_eq!(view.joined.len(), 1);
+        assert!(s.sync(&bob).joined.is_empty());
+
+        let jr = &view.joined[0];
+        assert_eq!(jr.room, room);
+        // State carries the create/member/power-levels/name events.
+        assert!(jr.state.iter().any(|p| p.kind == events::ROOM_CREATE));
+        assert!(jr.state.iter().any(|p| p.kind == events::ROOM_NAME));
+        // Timeline carries the message that was sent.
+        assert!(jr.timeline.iter().any(|p| p.kind == events::ROOM_MESSAGE));
+        assert!(view.next_batch.starts_with('s'));
     }
 
     #[test]

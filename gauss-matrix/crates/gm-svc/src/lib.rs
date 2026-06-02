@@ -124,6 +124,31 @@ impl<S: Store> RoomService<S> {
             .map(|p| p.content_json)
     }
 
+    /// Every room with persisted events, in id order.
+    pub fn rooms(&self) -> Vec<RoomId> {
+        let mut seen: Vec<RoomId> = Vec::new();
+        for (key, _) in self.store.scan(cf::EVENTS) {
+            let Some((room, _)) = key.split_once(SEP) else {
+                continue;
+            };
+            let Ok(room) = RoomId::parse(room) else {
+                continue;
+            };
+            if !seen.contains(&room) {
+                seen.push(room);
+            }
+        }
+        seen
+    }
+
+    /// The full current state of a room as events (the resolved-state PDUs).
+    pub fn current_state_pdus(&self, room: &RoomId) -> Vec<Pdu> {
+        self.current_state(room)
+            .into_values()
+            .filter_map(|event_id| self.pdu(room, &event_id))
+            .collect()
+    }
+
     /// The room's full current state map.
     pub fn current_state(&self, room: &RoomId) -> StateMap {
         let prefix = Self::room_prefix(room);
