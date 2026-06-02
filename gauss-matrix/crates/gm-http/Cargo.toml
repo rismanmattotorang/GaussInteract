@@ -24,3 +24,4 @@ gm-util = { path = "../gm-util" }
 # Integration tests drive the ingress against the real composed service core.
 gm-svc = { path = "../gm-svc" }
 gm-store = { path = "../gm-store" }
+gm-fed = { path = "../gm-fed" }

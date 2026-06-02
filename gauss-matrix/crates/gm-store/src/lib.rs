@@ -49,6 +49,9 @@ pub mod cf {
     /// Per-sender transaction ids → the event they produced, for idempotent
     /// retries of `PUT …/send/…/{txnId}` (§II, transaction identifiers).
     pub const TRANSACTIONS: &str = "transactions";
+    /// Origin server name → its federation signing key (§III.E). A stand-in for
+    /// the published-key fetch; production caches verified `/key/v2/server` keys.
+    pub const FEDERATION_KEYS: &str = "federation_keys";
 }
 
 /// A backend-agnostic, column-family keyed store.

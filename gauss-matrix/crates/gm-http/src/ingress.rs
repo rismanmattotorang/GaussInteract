@@ -33,8 +33,9 @@
 //! Authentication is gated centrally: a request to an [`Auth::AccessToken`]
 //! endpoint without a token is `401 M_MISSING_TOKEN`, and a token the service
 //! does not recognise is `401 M_UNKNOWN_TOKEN`; an [`Auth::Federation`] endpoint
-//! requires an `X-Matrix` signature header (`401 M_UNAUTHORIZED` if absent).
-//! All gating runs before any handler. Unknown
+//! must carry a valid `X-Matrix` request signature, verified against the origin
+//! server's key (`401 M_UNAUTHORIZED` otherwise). All gating runs before any
+//! handler. Unknown
 //! targets are `404 M_UNRECOGNIZED`; a known path with the wrong method is
 //! `405 M_UNRECOGNIZED` + an `Allow` header; endpoints on the
 //! [surface](crate::Endpoint::surface) without a handler yet are `501`.
@@ -201,21 +202,21 @@ impl<H: Homeserver> Ingress<H> {
                 }
             }
             Auth::Federation => {
-                // Require an `X-Matrix` request signature header. Verifying the
-                // signature against the origin server's key is a later slice;
-                // its *presence* is gated here so federation endpoints are not
-                // open to unauthenticated callers.
-                let signed = req.authorization.is_some_and(|h| {
-                    h.trim_start()
-                        .get(..8)
-                        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("X-Matrix"))
-                });
-                if signed {
+                // Verify the `X-Matrix` request signature against the origin
+                // server's key (the service reconstructs the canonical signing
+                // object and checks it). A missing, malformed, or invalid
+                // signature is rejected before any handler runs.
+                if self.server.verify_federation_request(
+                    method_name(&req.method),
+                    req.target,
+                    req.body,
+                    req.authorization,
+                ) {
                     Ok(None)
                 } else {
                     Err(Response::error(
                         401,
-                        &MatrixError::new("M_UNAUTHORIZED", "missing federation signature"),
+                        &MatrixError::new("M_UNAUTHORIZED", "invalid federation signature"),
                     ))
                 }
             }
@@ -633,8 +634,8 @@ fn json_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use gm_api::{
-        FederationReceiver, JoinedRoom, Login, MessageSender, RoomCreator, RoomReader,
-        RoomTimeline, SyncProvider, TokenAuthority,
+        FederationAuth, FederationReceiver, JoinedRoom, Login, MessageSender, RoomCreator,
+        RoomReader, RoomTimeline, SyncProvider, TokenAuthority,
     };
     use std::collections::BTreeMap;
 
@@ -720,6 +721,19 @@ mod tests {
             // The double echoes a room id derived from the optional name.
             let local = name.unwrap_or("new");
             RoomId::parse(format!("!{local}:gaussian.tech")).ok()
+        }
+    }
+    impl FederationAuth for TestServer {
+        fn verify_federation_request(
+            &self,
+            _method: &str,
+            _uri: &str,
+            _content: Option<&str>,
+            authorization: Option<&str>,
+        ) -> bool {
+            // The double trusts a well-formed X-Matrix header; real signature
+            // verification is exercised against GaussServer.
+            authorization.is_some_and(|h| h.trim_start().starts_with("X-Matrix"))
         }
     }
     impl FederationReceiver for TestServer {
