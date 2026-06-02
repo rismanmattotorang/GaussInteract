@@ -24,11 +24,15 @@
 //! - `GET /_matrix/client/v3/rooms/{roomId}/messages` → the room timeline as a
 //!   `{"chunk":[…]}` page;
 //! - `POST /_matrix/client/v3/createRoom` → originate a room, returning its id;
-//! - `GET /_matrix/client/v3/sync` → the joined rooms with state and timeline.
+//! - `GET /_matrix/client/v3/sync` → the joined rooms with state and timeline;
+//! - `PUT /_matrix/federation/v1/send/{txnId}` → ingest an inbound federation
+//!   transaction (PDUs/EDUs), returning the per-PDU acknowledgement.
 //!
 //! Authentication is gated centrally: a request to an [`Auth::AccessToken`]
 //! endpoint without a token is `401 M_MISSING_TOKEN`, and a token the service
-//! does not recognise is `401 M_UNKNOWN_TOKEN`, before any handler runs. Unknown
+//! does not recognise is `401 M_UNKNOWN_TOKEN`; an [`Auth::Federation`] endpoint
+//! requires an `X-Matrix` signature header (`401 M_UNAUTHORIZED` if absent).
+//! All gating runs before any handler. Unknown
 //! targets are `404 M_UNRECOGNIZED`; a known path with the wrong method is
 //! `405 M_UNRECOGNIZED` + an `Allow` header; endpoints on the
 //! [surface](crate::Endpoint::surface) without a handler yet are `501`.
@@ -177,21 +181,42 @@ impl<H: Homeserver> Ingress<H> {
     /// returned. Other auth schemes are not gated here yet (federation signature
     /// verification is a later slice).
     fn authenticate(&self, m: &RouteMatch, req: &Request<'_>) -> Result<Option<UserId>, Response> {
-        if m.endpoint.auth != Auth::AccessToken {
-            return Ok(None);
-        }
-        let Some(token) = access_token(req.authorization, req.target) else {
-            return Err(Response::error(
-                401,
-                &MatrixError::missing_token("missing access token"),
-            ));
-        };
-        match self.server.user_for(&token) {
-            Some(user) => Ok(Some(user)),
-            None => Err(Response::error(
-                401,
-                &MatrixError::unknown_token("unrecognized access token"),
-            )),
+        match m.endpoint.auth {
+            Auth::None | Auth::Appservice => Ok(None),
+            Auth::AccessToken => {
+                let Some(token) = access_token(req.authorization, req.target) else {
+                    return Err(Response::error(
+                        401,
+                        &MatrixError::missing_token("missing access token"),
+                    ));
+                };
+                match self.server.user_for(&token) {
+                    Some(user) => Ok(Some(user)),
+                    None => Err(Response::error(
+                        401,
+                        &MatrixError::unknown_token("unrecognized access token"),
+                    )),
+                }
+            }
+            Auth::Federation => {
+                // Require an `X-Matrix` request signature header. Verifying the
+                // signature against the origin server's key is a later slice;
+                // its *presence* is gated here so federation endpoints are not
+                // open to unauthenticated callers.
+                let signed = req.authorization.is_some_and(|h| {
+                    h.trim_start()
+                        .get(..8)
+                        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("X-Matrix"))
+                });
+                if signed {
+                    Ok(None)
+                } else {
+                    Err(Response::error(
+                        401,
+                        &MatrixError::new("M_UNAUTHORIZED", "missing federation signature"),
+                    ))
+                }
+            }
         }
     }
 
@@ -228,6 +253,7 @@ impl<H: Homeserver> Ingress<H> {
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/messages") => self.serve_messages(m),
             (Method::Post, "/_matrix/client/v3/createRoom") => self.serve_create_room(user, req),
             (Method::Get, "/_matrix/client/v3/sync") => self.serve_sync(user),
+            (Method::Put, "/_matrix/federation/v1/send/{txnId}") => self.serve_federation_send(req),
             _ => Response::error(
                 501,
                 &MatrixError::unrecognized("endpoint not yet implemented"),
@@ -322,6 +348,24 @@ impl<H: Homeserver> Ingress<H> {
         {
             Some(room) => Response::json_ok(room_id_body(room.as_str())),
             None => Response::error(403, &MatrixError::forbidden("room creation refused")),
+        }
+    }
+
+    /// `PUT /_matrix/federation/v1/send/{txnId}`: ingest an inbound federation
+    /// transaction (a batch of PDUs/EDUs as JSON), returning the per-PDU
+    /// acknowledgement. The X-Matrix signature header is required by the auth
+    /// gate; the body must be a JSON object.
+    fn serve_federation_send(&self, req: &Request<'_>) -> Response {
+        let body = req.body.unwrap_or("");
+        match Json::parse(body) {
+            Ok(txn @ Json::Object(_)) => {
+                Response::json_ok(self.server.receive_transaction(&txn).to_string())
+            }
+            Ok(_) => Response::error(
+                400,
+                &MatrixError::new("M_BAD_JSON", "transaction must be an object"),
+            ),
+            Err(_) => Response::error(400, &MatrixError::new("M_NOT_JSON", "body is not JSON")),
         }
     }
 
@@ -560,8 +604,8 @@ fn json_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use gm_api::{
-        JoinedRoom, Login, MessageSender, RoomCreator, RoomReader, RoomTimeline, SyncProvider,
-        TokenAuthority,
+        FederationReceiver, JoinedRoom, Login, MessageSender, RoomCreator, RoomReader,
+        RoomTimeline, SyncProvider, TokenAuthority,
     };
     use std::collections::BTreeMap;
 
@@ -642,6 +686,16 @@ mod tests {
             // The double echoes a room id derived from the optional name.
             let local = name.unwrap_or("new");
             RoomId::parse(format!("!{local}:gaussian.tech")).ok()
+        }
+    }
+    impl FederationReceiver for TestServer {
+        fn receive_transaction(&self, _txn: &Json) -> Json {
+            // Echo a fixed per-PDU ack so the ingress wiring is observable.
+            let mut pdus = BTreeMap::new();
+            pdus.insert("$fed".to_owned(), Json::Object(BTreeMap::new()));
+            let mut obj = BTreeMap::new();
+            obj.insert("pdus".to_owned(), Json::Object(pdus));
+            Json::Object(obj)
         }
     }
     impl SyncProvider for TestServer {
@@ -1118,6 +1172,38 @@ mod tests {
             .and_then(Json::as_object)
             .map(|o| o.len());
         assert_eq!(join, Some(0));
+    }
+
+    const FED_SEND: &str = "/_matrix/federation/v1/send/txn-1";
+
+    #[test]
+    fn federation_send_requires_an_x_matrix_signature() {
+        // No Authorization header -> the federation gate rejects it.
+        let req = Request::new(Method::Put, FED_SEND).with_body(r#"{"origin":"o","pdus":[]}"#);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("M_UNAUTHORIZED"));
+    }
+
+    #[test]
+    fn federation_send_with_signature_ingests_and_acks() {
+        let req = Request::new(Method::Put, FED_SEND)
+            .with_authorization("X-Matrix origin=other.tld,key=\"ed25519:1\",sig=\"abc\"")
+            .with_body(r#"{"origin":"other.tld","origin_server_ts":1,"pdus":[]}"#);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        // The acknowledgement carries the per-PDU result object.
+        assert!(Json::parse(&resp.body).unwrap().get("pdus").is_some());
+    }
+
+    #[test]
+    fn federation_send_with_a_non_object_body_is_400() {
+        let req = Request::new(Method::Put, FED_SEND)
+            .with_authorization("X-Matrix origin=other.tld")
+            .with_body("[]");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("M_BAD_JSON"));
     }
 
     #[test]

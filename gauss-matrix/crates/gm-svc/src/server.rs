@@ -17,9 +17,10 @@
 use crate::{AccountStore, RoomService, SessionStore};
 use gm_api::events;
 use gm_api::{
-    JoinedRoom, Json, Login, LoginGrant, MessageSender, Pdu, RoomCreator, RoomReader, RoomTimeline,
-    RoomVersion, SyncProvider, SyncView, TokenAuthority,
+    FederationReceiver, JoinedRoom, Json, Login, LoginGrant, MessageSender, Pdu, RoomCreator,
+    RoomReader, RoomTimeline, RoomVersion, SyncProvider, SyncView, TokenAuthority,
 };
+use gm_fed::Transaction;
 use gm_store::{cf, Store};
 use gm_util::{EventId, RoomId, UserId};
 use std::collections::BTreeMap;
@@ -148,6 +149,28 @@ impl<S: Store + Clone> SyncProvider for GaussServer<S> {
             next_batch: format!("s{}", self.store.count(cf::EVENTS)),
             joined,
         }
+    }
+}
+
+impl<S: Store + Clone> FederationReceiver for GaussServer<S> {
+    fn receive_transaction(&self, txn: &Json) -> Json {
+        let mut results = BTreeMap::new();
+        if let Ok(transaction) = Transaction::from_json(txn) {
+            let mut rooms = RoomService::new(self.store.clone());
+            for pdu in &transaction.pdus {
+                // Persist the inbound event. Full auth-chain/state-res validation
+                // of federated PDUs is a later slice; the per-event ack is the
+                // empty object on acceptance.
+                rooms.append(pdu);
+                results.insert(
+                    pdu.event_id.as_str().to_owned(),
+                    Json::Object(BTreeMap::new()),
+                );
+            }
+        }
+        let mut obj = BTreeMap::new();
+        obj.insert("pdus".to_owned(), Json::Object(results));
+        Json::Object(obj)
     }
 }
 
@@ -458,6 +481,34 @@ mod tests {
         // Timeline carries the message that was sent.
         assert!(jr.timeline.iter().any(|p| p.kind == events::ROOM_MESSAGE));
         assert!(view.next_batch.starts_with('s'));
+    }
+
+    #[test]
+    fn receive_transaction_ingests_federated_pdus() {
+        let s = server();
+        let room = RoomId::parse("!r:other.tld").unwrap();
+        let mut txn = gm_fed::Transaction::new("other.tld", 1700);
+        txn.pdus.push(Pdu {
+            event_id: EventId::parse("$fed1").unwrap(),
+            room_id: room.clone(),
+            sender: UserId::parse("@bob:other.tld").unwrap(),
+            kind: events::ROOM_MESSAGE.to_owned(),
+            state_key: None,
+            origin_server_ts: 1700,
+            depth: 1,
+            prev_events: Vec::new(),
+            auth_events: Vec::new(),
+            content_json: r#"{"body":"from afar"}"#.to_owned(),
+        });
+
+        let result = s.receive_transaction(&txn.to_json());
+        // The per-PDU ack carries an (empty) object keyed by event id.
+        assert!(result.get("pdus").and_then(|p| p.get("$fed1")).is_some());
+        // The federated event is now in the room timeline.
+        let timeline = s.timeline(&room);
+        assert_eq!(timeline.len(), 1);
+        assert_eq!(timeline[0].event_id.as_str(), "$fed1");
+        assert_eq!(timeline[0].sender.as_str(), "@bob:other.tld");
     }
 
     #[test]

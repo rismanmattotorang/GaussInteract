@@ -199,6 +199,7 @@ name = "gm-svc"
 version = "0.0.1"
 dependencies = [
  "gm-api",
+ "gm-fed",
  "gm-stateres",
  "gm-store",
  "gm-util",

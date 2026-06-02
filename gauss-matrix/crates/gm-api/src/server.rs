@@ -62,6 +62,17 @@ pub trait SyncProvider {
     fn sync(&self, user: &UserId) -> SyncView;
 }
 
+/// Receive an inbound federation transaction (the SS `PUT /send/{txnId}` path).
+///
+/// The argument is the transaction's JSON body and the result is the
+/// `{"pdus":{event_id:{}}}` per-event acknowledgement object the sending server
+/// expects. Implemented over the federation model in `gm-fed`; takes `&self`
+/// (the ingress is a shared front) and persists via interior mutability.
+pub trait FederationReceiver {
+    /// Ingest the transaction `txn` (JSON), returning the per-PDU result object.
+    fn receive_transaction(&self, txn: &crate::Json) -> crate::Json;
+}
+
 /// Create a room (the `POST /createRoom` path).
 ///
 /// Takes `&self` for the same reason as [`Login`]: the ingress is a shared
@@ -122,7 +133,14 @@ pub trait MessageSender {
 /// The full capability set the ingress requires of a homeserver. Blanket-
 /// implemented: any type providing all the capability traits is a `Homeserver`.
 pub trait Homeserver:
-    TokenAuthority + RoomReader + RoomTimeline + RoomCreator + Login + MessageSender + SyncProvider
+    TokenAuthority
+    + RoomReader
+    + RoomTimeline
+    + RoomCreator
+    + Login
+    + MessageSender
+    + SyncProvider
+    + FederationReceiver
 {
 }
 
@@ -134,6 +152,7 @@ impl<T> Homeserver for T where
         + Login
         + MessageSender
         + SyncProvider
+        + FederationReceiver
 {
 }
 
@@ -183,6 +202,18 @@ impl SyncProvider for NoServer {
             next_batch: "s0".to_owned(),
             joined: Vec::new(),
         }
+    }
+}
+
+impl FederationReceiver for NoServer {
+    fn receive_transaction(&self, _txn: &crate::Json) -> crate::Json {
+        // Acknowledge with no per-PDU results.
+        let mut obj = std::collections::BTreeMap::new();
+        obj.insert(
+            "pdus".to_owned(),
+            crate::Json::Object(std::collections::BTreeMap::new()),
+        );
+        crate::Json::Object(obj)
     }
 }
 
