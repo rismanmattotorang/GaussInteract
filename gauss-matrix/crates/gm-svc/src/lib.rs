@@ -189,6 +189,10 @@ impl<S: Store> gm_api::RoomReader for RoomService<S> {
     ) -> Option<String> {
         self.state_event_content(room, event_type, state_key)
     }
+
+    fn room_state(&self, room: &RoomId) -> Vec<gm_api::Pdu> {
+        self.current_state_pdus(room)
+    }
 }
 
 #[cfg(test)]

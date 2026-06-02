@@ -26,7 +26,9 @@
 //! - `POST /_matrix/client/v3/createRoom` → originate a room, returning its id;
 //! - `GET /_matrix/client/v3/sync` → the joined rooms with state and timeline;
 //! - `PUT /_matrix/federation/v1/send/{txnId}` → ingest an inbound federation
-//!   transaction (PDUs/EDUs), returning the per-PDU acknowledgement.
+//!   transaction (PDUs/EDUs), returning the per-PDU acknowledgement;
+//! - `GET /_matrix/federation/v1/state/{roomId}` → the room's current state as
+//!   `{"pdus":[…],"auth_chain":[…]}`.
 //!
 //! Authentication is gated centrally: a request to an [`Auth::AccessToken`]
 //! endpoint without a token is `401 M_MISSING_TOKEN`, and a token the service
@@ -254,6 +256,9 @@ impl<H: Homeserver> Ingress<H> {
             (Method::Post, "/_matrix/client/v3/createRoom") => self.serve_create_room(user, req),
             (Method::Get, "/_matrix/client/v3/sync") => self.serve_sync(user),
             (Method::Put, "/_matrix/federation/v1/send/{txnId}") => self.serve_federation_send(req),
+            (Method::Get, "/_matrix/federation/v1/state/{roomId}") => {
+                self.serve_federation_state(m)
+            }
             _ => Response::error(
                 501,
                 &MatrixError::unrecognized("endpoint not yet implemented"),
@@ -367,6 +372,30 @@ impl<H: Homeserver> Ingress<H> {
             ),
             Err(_) => Response::error(400, &MatrixError::new("M_NOT_JSON", "body is not JSON")),
         }
+    }
+
+    /// `GET /_matrix/federation/v1/state/{roomId}`: the room's full current
+    /// state as `{"pdus":[…],"auth_chain":[…]}`. The auth chain (the events
+    /// authorising the state) is derived during full state-resolution, a later
+    /// slice; it is empty for now.
+    fn serve_federation_state(&self, m: &RouteMatch) -> Response {
+        let Some(room_id) = m.param("roomId") else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let Ok(room) = RoomId::parse(room_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        let state = self.server.room_state(&room);
+        let mut obj = BTreeMap::new();
+        obj.insert(
+            "pdus".to_owned(),
+            Json::Array(state.iter().map(Pdu::to_json).collect()),
+        );
+        obj.insert("auth_chain".to_owned(), Json::Array(Vec::new()));
+        Response::json_ok(Json::Object(obj).to_string())
     }
 
     /// `GET /_matrix/client/v3/sync`: the authenticated user's joined rooms, each
@@ -643,6 +672,11 @@ mod tests {
                     state_key.to_owned(),
                 ))
                 .cloned()
+        }
+
+        fn room_state(&self, _room: &RoomId) -> Vec<Pdu> {
+            // The double's `/state` returns the timeline events it was seeded with.
+            self.timeline.clone()
         }
     }
     impl Login for TestServer {
@@ -1204,6 +1238,34 @@ mod tests {
         let resp = authed().handle(&req);
         assert_eq!(resp.status, 400);
         assert!(resp.body.contains("M_BAD_JSON"));
+    }
+
+    #[test]
+    fn federation_state_read_requires_a_signature() {
+        let resp = server_with_timeline().dispatch(
+            Method::Get,
+            "/_matrix/federation/v1/state/!room:gaussian.tech",
+        );
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("M_UNAUTHORIZED"));
+    }
+
+    #[test]
+    fn federation_state_read_returns_pdus_and_auth_chain() {
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/federation/v1/state/!room:gaussian.tech",
+        )
+        .with_authorization("X-Matrix origin=other.tld");
+        let resp = server_with_timeline().handle(&req);
+        assert_eq!(resp.status, 200);
+        let body = Json::parse(&resp.body).unwrap();
+        // The double's room_state returns its timeline (two events).
+        assert_eq!(
+            body.get("pdus").and_then(Json::as_array).map(<[_]>::len),
+            Some(2)
+        );
+        assert!(body.get("auth_chain").and_then(Json::as_array).is_some());
     }
 
     #[test]
