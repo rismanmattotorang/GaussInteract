@@ -55,6 +55,10 @@ pub mod cf {
     /// Global insertion-ordered index of appended events, for incremental sync:
     /// `{seq:020}` → `{room}\u{1f}{event_id}` (§II, sync `since` tokens).
     pub const EVENT_STREAM: &str = "event_stream";
+    /// This server's own federation signing keys (§III.E): `key_id` → key
+    /// material, published at `GET /_matrix/key/v2/server` and used to sign
+    /// outbound requests. A scaffold stand-in for an Ed25519 keypair.
+    pub const SERVER_KEYS: &str = "server_keys";
 }
 
 /// A backend-agnostic, column-family keyed store.

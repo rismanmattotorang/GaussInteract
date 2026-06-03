@@ -18,8 +18,8 @@ use crate::{AccountStore, RoomService, SessionStore};
 use gm_api::events;
 use gm_api::{
     FederationAuth, FederationReceiver, JoinedRoom, Json, Login, LoginGrant, MembershipChanger,
-    MessageSender, Pdu, RoomCreator, RoomReader, RoomTimeline, RoomVersion, SyncProvider, SyncView,
-    TokenAuthority,
+    MessageSender, Pdu, RoomCreator, RoomReader, RoomTimeline, RoomVersion, ServerKeys,
+    SyncProvider, SyncView, TokenAuthority,
 };
 use gm_fed::{auth as fed_auth, Transaction};
 use gm_store::{cf, Store};
@@ -77,6 +77,16 @@ impl<S: Store + Clone> GaussServer<S> {
         self.store
             .get(cf::FEDERATION_KEYS, origin)
             .and_then(|v| String::from_utf8(v).ok())
+    }
+
+    /// Register one of this server's own signing keys under `key_id` (e.g.
+    /// `ed25519:1`), published at `GET /_matrix/key/v2/server`. Also registers it
+    /// as this server's federation key so the server can verify its own
+    /// signatures. Setup helper standing in for an Ed25519 keypair.
+    pub fn register_signing_key(&self, key_id: &str, key: &str) {
+        let mut store = self.store.clone();
+        store.put(cf::SERVER_KEYS, key_id, key.as_bytes());
+        store.put(cf::FEDERATION_KEYS, &self.server_name, key.as_bytes());
     }
 
     /// The room's timeline, oldest first.
@@ -260,6 +270,56 @@ impl<S: Store + Clone> FederationReceiver for GaussServer<S> {
         let mut obj = BTreeMap::new();
         obj.insert("pdus".to_owned(), Json::Object(results));
         Json::Object(obj)
+    }
+}
+
+impl<S: Store + Clone> ServerKeys for GaussServer<S> {
+    fn server_keys(&self) -> Json {
+        // verify_keys: { "<key_id>": { "key": "<material>" } } for every own key.
+        let mut verify_keys = BTreeMap::new();
+        for (key_id, value) in self.store.scan(cf::SERVER_KEYS) {
+            let Ok(material) = String::from_utf8(value) else {
+                continue;
+            };
+            let mut entry = BTreeMap::new();
+            entry.insert("key".to_owned(), Json::String(material));
+            verify_keys.insert(key_id, Json::Object(entry));
+        }
+
+        // The unsigned document: server name, validity window, and verify keys.
+        // Keys are valid for 24h from now (the scaffold's fixed lifetime).
+        let valid_until_ts = now_ms() + 24 * 60 * 60 * 1000;
+        let mut doc = BTreeMap::new();
+        doc.insert(
+            "server_name".to_owned(),
+            Json::String(self.server_name.clone()),
+        );
+        doc.insert(
+            "valid_until_ts".to_owned(),
+            Json::Number(valid_until_ts as f64),
+        );
+        doc.insert("old_verify_keys".to_owned(), Json::Object(BTreeMap::new()));
+        doc.insert("verify_keys".to_owned(), Json::Object(verify_keys.clone()));
+
+        // Self-sign the canonical (signatures-free) document with each own key,
+        // so a fetcher can verify the document against the key it advertises.
+        let signing_bytes = Json::Object(doc.clone()).to_string();
+        let mut by_key = BTreeMap::new();
+        for (key_id, value) in self.store.scan(cf::SERVER_KEYS) {
+            if let Ok(material) = String::from_utf8(value) {
+                by_key.insert(
+                    key_id,
+                    Json::String(fed_auth::sign(signing_bytes.as_bytes(), &material)),
+                );
+            }
+        }
+        let mut signatures = BTreeMap::new();
+        if !by_key.is_empty() {
+            signatures.insert(self.server_name.clone(), Json::Object(by_key));
+        }
+        doc.insert("signatures".to_owned(), Json::Object(signatures));
+
+        Json::Object(doc)
     }
 }
 
@@ -796,6 +856,45 @@ mod tests {
         let after = s.sync(&bob, Some(&delta.next_batch));
         assert!(after.joined.is_empty());
         assert!(after.left.is_empty());
+    }
+
+    #[test]
+    fn server_keys_publishes_registered_keys_and_self_signs() {
+        let s = GaussServer::new(SharedStore::new(), "b.tld");
+        s.register_signing_key("ed25519:1", "secret-key");
+
+        let doc = s.server_keys();
+        assert_eq!(doc.get("server_name").and_then(Json::as_str), Some("b.tld"));
+        // The verify key is published under its key id.
+        let key = doc
+            .get("verify_keys")
+            .and_then(|v| v.get("ed25519:1"))
+            .and_then(|e| e.get("key"))
+            .and_then(Json::as_str);
+        assert_eq!(key, Some("secret-key"));
+        // valid_until_ts is a future timestamp.
+        assert!(doc
+            .get("valid_until_ts")
+            .and_then(Json::as_u64)
+            .is_some_and(|ts| ts > 0));
+        // The document self-signs under server_name -> key id.
+        assert!(doc
+            .get("signatures")
+            .and_then(|s| s.get("b.tld"))
+            .and_then(|s| s.get("ed25519:1"))
+            .and_then(Json::as_str)
+            .is_some());
+    }
+
+    #[test]
+    fn server_keys_with_no_key_configured_has_empty_verify_keys() {
+        let s = GaussServer::new(SharedStore::new(), "b.tld");
+        let doc = s.server_keys();
+        let verify_keys = doc.get("verify_keys").and_then(Json::as_object).unwrap();
+        assert!(verify_keys.is_empty());
+        // With no keys there is nothing to self-sign with.
+        let sigs = doc.get("signatures").and_then(Json::as_object).unwrap();
+        assert!(sigs.is_empty());
     }
 
     #[test]
