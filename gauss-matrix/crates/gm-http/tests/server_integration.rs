@@ -226,11 +226,19 @@ fn client_logs_in_creates_a_room_then_sends_a_message_idempotently() {
     assert_eq!(timeline_msgs, 2);
 }
 
-/// The federation transaction node A sends (one PDU for a room on B).
+/// The federation transaction node A sends: a self-consistent history for a
+/// room on a.tld (create -> carol's join -> message), so each PDU authorizes
+/// against the state the prior ones establish on the receiver.
 const FED_TXN: &str = concat!(
-    r#"{"origin":"a.tld","origin_server_ts":1700,"pdus":[{"#,
-    r#""event_id":"$fed1","room_id":"!shared:b.tld","sender":"@carol:a.tld","#,
-    r#""type":"m.room.message","origin_server_ts":1700,"depth":1,"#,
+    r#"{"origin":"a.tld","origin_server_ts":1700,"pdus":["#,
+    r#"{"event_id":"$c","room_id":"!shared:a.tld","sender":"@carol:a.tld","#,
+    r#""type":"m.room.create","state_key":"","origin_server_ts":1,"depth":1,"#,
+    r#""prev_events":[],"auth_events":[],"content":{"creator":"@carol:a.tld"}},"#,
+    r#"{"event_id":"$m","room_id":"!shared:a.tld","sender":"@carol:a.tld","#,
+    r#""type":"m.room.member","state_key":"@carol:a.tld","origin_server_ts":2,"depth":2,"#,
+    r#""prev_events":[],"auth_events":[],"content":{"membership":"join"}},"#,
+    r#"{"event_id":"$fed1","room_id":"!shared:a.tld","sender":"@carol:a.tld","#,
+    r#""type":"m.room.message","origin_server_ts":3,"depth":3,"#,
     r#""prev_events":[],"auth_events":[],"content":{"body":"hello from A"}}]}"#
 );
 const FED_TARGET: &str = "/_matrix/federation/v1/send/txn-A-1";
@@ -357,20 +365,20 @@ fn federation_send_delivers_a_signed_event_between_two_servers_over_tcp() {
     transport::serve_connection(&stream, &ingress_b).unwrap();
     let (status, body) = sender.join().unwrap().unwrap();
 
-    // B verified the signature, accepted the transaction, and acked the PDU.
+    // B verified the signature, authorized the events, and acked each PDU.
     assert_eq!(status, 200);
-    assert!(Json::parse(&body)
-        .unwrap()
-        .get("pdus")
-        .and_then(|p| p.get("$fed1"))
-        .is_some());
+    let acked = Json::parse(&body).unwrap();
+    for id in ["$c", "$m", "$fed1"] {
+        let ack = acked.get("pdus").and_then(|p| p.get(id)).unwrap();
+        assert!(ack.get("error").is_none(), "{id} should be accepted");
+    }
 
-    // The federated event is now persisted in B's room timeline.
+    // The federated history is now persisted in B's room timeline.
     let b = GaussServer::new(store_b, "b.tld");
-    let timeline = b.timeline(&RoomId::parse("!shared:b.tld").unwrap());
-    assert_eq!(timeline.len(), 1);
-    assert_eq!(timeline[0].event_id.as_str(), "$fed1");
-    assert_eq!(timeline[0].sender.as_str(), "@carol:a.tld");
+    let timeline = b.timeline(&RoomId::parse("!shared:a.tld").unwrap());
+    assert_eq!(timeline.len(), 3);
+    assert_eq!(timeline[2].event_id.as_str(), "$fed1");
+    assert_eq!(timeline[2].sender.as_str(), "@carol:a.tld");
 }
 
 #[test]
@@ -395,7 +403,7 @@ fn federation_send_with_a_bad_signature_is_rejected_and_ingests_nothing() {
     // Nothing was ingested.
     let b = GaussServer::new(store_b, "b.tld");
     assert!(b
-        .timeline(&RoomId::parse("!shared:b.tld").unwrap())
+        .timeline(&RoomId::parse("!shared:a.tld").unwrap())
         .is_empty());
 }
 
