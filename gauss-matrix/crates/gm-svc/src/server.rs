@@ -24,8 +24,9 @@ use gm_api::{
 use gm_fed::{auth as fed_auth, Transaction};
 use gm_store::{cf, Store};
 use gm_util::{EventId, RoomId, UserId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Delimiter for the `(sender, txn_id)` transaction key.
@@ -40,6 +41,10 @@ const MAX_TYPING_MS: u64 = 30_000;
 pub struct GaussServer<S: Store + Clone> {
     store: S,
     server_name: String,
+    /// Per-room write locks, serialising the read-tip → append critical section
+    /// so concurrent writers to one room cannot fork its DAG (see
+    /// [`Self::room_lock`]). Shared across clones and connection threads.
+    room_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl<S: Store + Clone> GaussServer<S> {
@@ -48,6 +53,7 @@ impl<S: Store + Clone> GaussServer<S> {
         Self {
             store,
             server_name: server_name.into(),
+            room_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -185,6 +191,17 @@ impl<S: Store + Clone> GaussServer<S> {
     /// The room's timeline, oldest first.
     pub fn timeline(&self, room: &RoomId) -> Vec<Pdu> {
         RoomService::new(self.store.clone()).timeline(room)
+    }
+
+    /// The write lock for `room`, creating it on first use. Hold it across a
+    /// read-tip → authorize → append sequence so two writers cannot both link
+    /// onto the same tip and fork the room's DAG.
+    fn room_lock(&self, room: &RoomId) -> Arc<Mutex<()>> {
+        let mut map = self
+            .room_locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        map.entry(room.as_str().to_owned()).or_default().clone()
     }
 
     /// Whether `user`'s current `m.room.member` state in `room` is `join`.
@@ -604,6 +621,10 @@ impl<S: Store + Clone> MembershipChanger for GaussServer<S> {
         target: &UserId,
         membership: &str,
     ) -> Option<String> {
+        // Serialise writers to this room so the tip we link onto is stable.
+        let lock = self.room_lock(room);
+        let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+
         let mut rooms = RoomService::new(self.store.clone());
         let (depth, prev_events) = match rooms.timeline(room).last() {
             Some(tip) => (tip.depth + 1, vec![tip.event_id.clone()]),
@@ -720,6 +741,10 @@ impl<S: Store + Clone> MessageSender for GaussServer<S> {
         if let Some(existing) = self.store.get(cf::TRANSACTIONS, &txn_key) {
             return String::from_utf8(existing).ok();
         }
+
+        // Serialise writers to this room so the tip we link onto is stable.
+        let lock = self.room_lock(room);
+        let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
 
         let mut rooms = RoomService::new(self.store.clone());
         // Link the new event onto the current linear tip of the room DAG.
@@ -1575,6 +1600,48 @@ mod tests {
         let ack = result.get("pdus").and_then(|p| p.get("$orphan")).unwrap();
         assert!(ack.get("error").is_some());
         assert!(s.timeline(&room).is_empty());
+    }
+
+    #[test]
+    fn concurrent_sends_to_one_room_form_a_linear_dag() {
+        // Many threads send into the same room through one shared server; the
+        // per-room lock must serialise them so each event links onto the
+        // previous tip — no two events share a depth, and the chain is linear.
+        let s = std::sync::Arc::new(server());
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+
+        let mut handles = Vec::new();
+        for i in 0..16 {
+            let s = std::sync::Arc::clone(&s);
+            let alice = alice.clone();
+            let room = room.clone();
+            handles.push(std::thread::spawn(move || {
+                s.send_message(
+                    &alice,
+                    &room,
+                    events::ROOM_MESSAGE,
+                    &format!("txn-{i}"),
+                    r#"{"body":"x"}"#,
+                )
+                .unwrap()
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let messages: Vec<_> = s
+            .timeline(&room)
+            .into_iter()
+            .filter(|p| p.kind == events::ROOM_MESSAGE)
+            .collect();
+        assert_eq!(messages.len(), 16);
+        // Every depth is distinct (no two writers linked onto the same tip).
+        let mut depths: Vec<u64> = messages.iter().map(|p| p.depth).collect();
+        depths.sort_unstable();
+        depths.dedup();
+        assert_eq!(depths.len(), 16);
     }
 
     #[test]
