@@ -150,24 +150,59 @@ impl<S: Store + Clone> RoomTimeline for GaussServer<S> {
 }
 
 impl<S: Store + Clone> SyncProvider for GaussServer<S> {
-    fn sync(&self, user: &UserId) -> SyncView {
+    fn sync(&self, user: &UserId, since: Option<&str>) -> SyncView {
         let rooms = RoomService::new(self.store.clone());
-        let joined = rooms
-            .rooms()
-            .into_iter()
-            .filter(|room| self.is_joined(&rooms, room, user))
-            .map(|room| JoinedRoom {
-                state: rooms.current_state_pdus(&room),
-                timeline: rooms.timeline(&room),
-                room,
-            })
-            .collect();
-        // The token is a coarse cursor over the event log; incremental sync
-        // (deltas since the token) is a later refinement — this is initial sync.
-        SyncView {
-            next_batch: format!("s{}", self.store.count(cf::EVENTS)),
-            joined,
-        }
+        let next_batch = format!("s{}", rooms.stream_len());
+
+        // A `since` token of the form "s{N}" requests an incremental sync from
+        // stream position N; anything else (absent or malformed) is initial sync.
+        let from = since
+            .and_then(|t| t.strip_prefix('s'))
+            .and_then(|n| n.parse::<usize>().ok());
+
+        let joined = match from {
+            None => rooms
+                .rooms()
+                .into_iter()
+                .filter(|room| self.is_joined(&rooms, room, user))
+                .map(|room| JoinedRoom {
+                    state: rooms.current_state_pdus(&room),
+                    timeline: rooms.timeline(&room),
+                    room,
+                })
+                .collect(),
+            Some(pos) => {
+                // Only the events that arrived since the token, grouped per room,
+                // for rooms the user is joined to. State is the state events among
+                // the delta. (Full state on a room's first appearance after a
+                // join is a later refinement.)
+                let mut by_room: std::collections::BTreeMap<String, Vec<Pdu>> =
+                    std::collections::BTreeMap::new();
+                for pdu in rooms.events_since(pos) {
+                    by_room
+                        .entry(pdu.room_id.as_str().to_owned())
+                        .or_default()
+                        .push(pdu);
+                }
+                by_room
+                    .into_iter()
+                    .filter_map(|(room_str, timeline)| {
+                        let room = RoomId::parse(room_str).ok()?;
+                        if !self.is_joined(&rooms, &room, user) {
+                            return None;
+                        }
+                        let state = timeline.iter().filter(|p| p.is_state()).cloned().collect();
+                        Some(JoinedRoom {
+                            room,
+                            state,
+                            timeline,
+                        })
+                    })
+                    .collect()
+            }
+        };
+
+        SyncView { next_batch, joined }
     }
 }
 
@@ -568,9 +603,9 @@ mod tests {
         .unwrap();
 
         // Alice (the creator, joined) sees the room; Bob (not a member) does not.
-        let view = s.sync(&alice);
+        let view = s.sync(&alice, None);
         assert_eq!(view.joined.len(), 1);
-        assert!(s.sync(&bob).joined.is_empty());
+        assert!(s.sync(&bob, None).joined.is_empty());
 
         let jr = &view.joined[0];
         assert_eq!(jr.room, room);
@@ -580,6 +615,44 @@ mod tests {
         // Timeline carries the message that was sent.
         assert!(jr.timeline.iter().any(|p| p.kind == events::ROOM_MESSAGE));
         assert!(view.next_batch.starts_with('s'));
+    }
+
+    #[test]
+    fn incremental_sync_returns_only_events_after_the_token() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+
+        // Take a token after creation; nothing new since then.
+        let token = s.sync(&alice, None).next_batch;
+        assert!(s.sync(&alice, Some(&token)).joined.is_empty());
+
+        // Send two messages, then sync incrementally from the token.
+        s.send_message(
+            &alice,
+            &room,
+            events::ROOM_MESSAGE,
+            "t1",
+            r#"{"body":"one"}"#,
+        )
+        .unwrap();
+        s.send_message(
+            &alice,
+            &room,
+            events::ROOM_MESSAGE,
+            "t2",
+            r#"{"body":"two"}"#,
+        )
+        .unwrap();
+
+        let delta = s.sync(&alice, Some(&token));
+        assert_eq!(delta.joined.len(), 1);
+        let jr = &delta.joined[0];
+        // Only the two new messages — not the creation events.
+        assert_eq!(jr.timeline.len(), 2);
+        assert!(jr.timeline.iter().all(|p| p.kind == events::ROOM_MESSAGE));
+        // Catching up to the new token yields an empty delta again.
+        assert!(s.sync(&alice, Some(&delta.next_batch)).joined.is_empty());
     }
 
     #[test]

@@ -52,6 +52,9 @@ pub mod cf {
     /// Origin server name → its federation signing key (§III.E). A stand-in for
     /// the published-key fetch; production caches verified `/key/v2/server` keys.
     pub const FEDERATION_KEYS: &str = "federation_keys";
+    /// Global insertion-ordered index of appended events, for incremental sync:
+    /// `{seq:020}` → `{room}\u{1f}{event_id}` (§II, sync `since` tokens).
+    pub const EVENT_STREAM: &str = "event_stream";
 }
 
 /// A backend-agnostic, column-family keyed store.

@@ -60,9 +60,11 @@ pub struct SyncView {
 
 /// Build a user's sync view (the CS `/sync` path).
 pub trait SyncProvider {
-    /// The current sync view for `user` (initial sync: full state + timeline of
-    /// every joined room).
-    fn sync(&self, user: &UserId) -> SyncView;
+    /// The sync view for `user`. With `since = None` it is an **initial sync**
+    /// (full state + timeline of every joined room); with a `since` token from a
+    /// prior `next_batch` it is an **incremental sync** (only the events that
+    /// arrived after that token). Always returns the `next_batch` to resume from.
+    fn sync(&self, user: &UserId, since: Option<&str>) -> SyncView;
 }
 
 /// Receive an inbound federation transaction (the SS `PUT /send/{txnId}` path).
@@ -246,7 +248,7 @@ impl RoomCreator for NoServer {
 }
 
 impl SyncProvider for NoServer {
-    fn sync(&self, _user: &UserId) -> SyncView {
+    fn sync(&self, _user: &UserId, _since: Option<&str>) -> SyncView {
         SyncView {
             next_batch: "s0".to_owned(),
             joined: Vec::new(),

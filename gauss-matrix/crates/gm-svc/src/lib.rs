@@ -67,7 +67,8 @@ impl<S: Store> RoomService<S> {
 
     /// Append an event: persist it to the room timeline and, if it is a state
     /// event, update the current-state slot (last write wins for the linear
-    /// case; divergent state is merged via [`Self::resolve_forks`]).
+    /// case; divergent state is merged via [`Self::resolve_forks`]). Also records
+    /// it in the global event stream so incremental sync can slice by position.
     pub fn append(&mut self, pdu: &Pdu) {
         self.store
             .put(cf::EVENTS, &Self::timeline_key(pdu), &codec::encode(pdu));
@@ -78,6 +79,36 @@ impl<S: Store> RoomService<S> {
                 pdu.event_id.as_str().as_bytes(),
             );
         }
+        // The global stream position is the current stream length (monotonic).
+        let seq = self.store.count(cf::EVENT_STREAM);
+        self.store.put(
+            cf::EVENT_STREAM,
+            &format!("{seq:020}"),
+            format!("{}{SEP}{}", pdu.room_id.as_str(), pdu.event_id.as_str()).as_bytes(),
+        );
+    }
+
+    /// The number of events recorded in the global stream — the cursor a
+    /// `next_batch` sync token encodes.
+    pub fn stream_len(&self) -> usize {
+        self.store.count(cf::EVENT_STREAM)
+    }
+
+    /// Events appended at stream position `>= since`, in insertion order, as the
+    /// PDUs they reference — the delta an incremental sync returns.
+    pub fn events_since(&self, since: usize) -> Vec<Pdu> {
+        self.store
+            .scan(cf::EVENT_STREAM)
+            .into_iter()
+            .filter(|(k, _)| k.parse::<usize>().is_ok_and(|seq| seq >= since))
+            .filter_map(|(_, v)| {
+                let entry = String::from_utf8(v).ok()?;
+                let (room, event_id) = entry.split_once(SEP)?;
+                let room = RoomId::parse(room).ok()?;
+                let event_id = EventId::parse(event_id).ok()?;
+                self.pdu(&room, &event_id)
+            })
+            .collect()
     }
 
     /// The room's timeline, oldest first.
