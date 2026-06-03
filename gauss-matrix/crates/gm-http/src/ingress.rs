@@ -20,6 +20,8 @@
 //! - `GET /_matrix/client/v3/rooms/{roomId}/state` → the room's full state;
 //! - `GET /_matrix/client/v3/rooms/{roomId}/members` → the room's membership
 //!   events as a `{"chunk":[…]}`;
+//! - `GET /_matrix/client/v3/rooms/{roomId}/joined_members` → the joined users
+//!   as a `{"joined":{user_id:{…}}}` map;
 //! - `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}[/{stateKey}]` → the
 //!   content of a state event;
 //! - `PUT /_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}` → send a
@@ -255,6 +257,9 @@ impl<H: Homeserver> Ingress<H> {
             }
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/state") => self.serve_room_state(m),
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/members") => self.serve_members(m),
+            (Method::Get, "/_matrix/client/v3/rooms/{roomId}/joined_members") => {
+                self.serve_joined_members(m)
+            }
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}")
             | (Method::Get, "/_matrix/client/v3/rooms/{roomId}/state/{eventType}") => {
                 self.serve_state_event(m)
@@ -565,6 +570,50 @@ impl<H: Homeserver> Ingress<H> {
             .collect();
         let mut obj = BTreeMap::new();
         obj.insert("chunk".to_owned(), Json::Array(members));
+        Response::json_ok(Json::Object(obj).to_string())
+    }
+
+    /// `GET /_matrix/client/v3/rooms/{roomId}/joined_members`: return the
+    /// currently-joined users as `{"joined":{user_id:{display_name?,
+    /// avatar_url?}}}`. Only members whose current membership is `join` are
+    /// included; their `displayname`/`avatar_url` are carried through from the
+    /// member event when present. A malformed room id is `400`; an unknown room
+    /// is an empty map.
+    fn serve_joined_members(&self, m: &RouteMatch) -> Response {
+        let Some(room_id) = m.param("roomId") else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let Ok(room) = RoomId::parse(room_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        let mut joined = BTreeMap::new();
+        for pdu in self.server.room_state(&room) {
+            if pdu.kind != gm_api::events::ROOM_MEMBER {
+                continue;
+            }
+            let Some(user_id) = pdu.state_key.clone() else {
+                continue;
+            };
+            let Ok(content) = Json::parse(&pdu.content_json) else {
+                continue;
+            };
+            if content.get("membership").and_then(Json::as_str) != Some("join") {
+                continue;
+            }
+            // Carry through the optional profile fields the member event holds.
+            let mut profile = BTreeMap::new();
+            for field in ["displayname", "avatar_url"] {
+                if let Some(value) = content.get(field).and_then(Json::as_str) {
+                    profile.insert(field.to_owned(), Json::String(value.to_owned()));
+                }
+            }
+            joined.insert(user_id, Json::Object(profile));
+        }
+        let mut obj = BTreeMap::new();
+        obj.insert("joined".to_owned(), Json::Object(joined));
         Response::json_ok(Json::Object(obj).to_string())
     }
 
@@ -1240,6 +1289,54 @@ mod tests {
         let resp = server_with_members().dispatch(
             Method::Get,
             "/_matrix/client/v3/rooms/!room:gaussian.tech/members",
+        );
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
+    }
+
+    #[test]
+    fn joined_members_maps_joined_users_and_excludes_those_who_left() {
+        // alice (join, with a display name), bob (join), carol (left).
+        let mut alice = member_pdu("$m1", "@alice:gaussian.tech");
+        alice.content_json = r#"{"membership":"join","displayname":"Alice"}"#.to_owned();
+        let mut carol = member_pdu("$m3", "@carol:gaussian.tech");
+        carol.content_json = r#"{"membership":"leave"}"#.to_owned();
+        let server = Ingress::with_server(TestServer {
+            token: "tok123".to_owned(),
+            user: "@alice:gaussian.tech".to_owned(),
+            password: "pw".to_owned(),
+            state: BTreeMap::new(),
+            timeline: vec![alice, member_pdu("$m2", "@bob:gaussian.tech"), carol],
+        });
+
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/joined_members",
+        )
+        .with_authorization("Bearer tok123");
+        let resp = server.handle(&req);
+        assert_eq!(resp.status, 200);
+        let parsed = Json::parse(&resp.body).unwrap();
+        let joined = parsed.get("joined").unwrap();
+        // alice and bob are joined; carol (left) is absent.
+        assert!(joined.get("@alice:gaussian.tech").is_some());
+        assert!(joined.get("@bob:gaussian.tech").is_some());
+        assert!(joined.get("@carol:gaussian.tech").is_none());
+        // alice's display name is carried through.
+        assert_eq!(
+            joined
+                .get("@alice:gaussian.tech")
+                .and_then(|p| p.get("displayname"))
+                .and_then(Json::as_str),
+            Some("Alice")
+        );
+    }
+
+    #[test]
+    fn joined_members_requires_authentication() {
+        let resp = server_with_members().dispatch(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/joined_members",
         );
         assert_eq!(resp.status, 401);
         assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
