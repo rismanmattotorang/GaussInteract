@@ -102,6 +102,15 @@ impl Endpoint {
             auth: Auth::Federation,
         }
     }
+    /// A public (unauthenticated) Server–Server endpoint, e.g. key publishing.
+    const fn ss_public(method: Method, path: &'static str) -> Self {
+        Self {
+            api: Api::ServerServer,
+            method,
+            path,
+            auth: Auth::None,
+        }
+    }
     const fn as_(method: Method, path: &'static str) -> Self {
         Self {
             api: Api::Appservice,
@@ -163,6 +172,7 @@ static SURFACE: &[Endpoint] = &[
     Endpoint::cs(Method::Post, "/_matrix/client/v3/keys/upload"),
     Endpoint::cs(Method::Post, "/_matrix/client/v3/keys/query"),
     // Server–Server
+    Endpoint::ss_public(Method::Get, "/_matrix/key/v2/server"),
     Endpoint::ss(Method::Put, "/_matrix/federation/v1/send/{txnId}"),
     Endpoint::ss(Method::Get, "/_matrix/federation/v1/state/{roomId}"),
     // Application Service

@@ -92,6 +92,18 @@ pub trait FederationReceiver {
     fn receive_transaction(&self, txn: &crate::Json) -> crate::Json;
 }
 
+/// Publish this server's federation signing keys (the SS `GET /_matrix/key/v2/server`
+/// path, spec §III.E).
+///
+/// Returns the server's key document as JSON — `server_name`, `valid_until_ts`,
+/// the `verify_keys` other servers use to check this server's signatures, and a
+/// self-`signatures` block — so remote servers can fetch and cache it. A server
+/// with no keys configured publishes an empty `verify_keys` map.
+pub trait ServerKeys {
+    /// This server's published key document (a JSON object).
+    fn server_keys(&self) -> crate::Json;
+}
+
 /// Verify an inbound federation request's `X-Matrix` signature (spec §III.E).
 ///
 /// Given the request's method, URI, body and `Authorization` header, the
@@ -200,6 +212,7 @@ pub trait Homeserver:
     + SyncProvider
     + FederationReceiver
     + FederationAuth
+    + ServerKeys
 {
 }
 
@@ -214,6 +227,7 @@ impl<T> Homeserver for T where
         + SyncProvider
         + FederationReceiver
         + FederationAuth
+        + ServerKeys
 {
 }
 
@@ -277,6 +291,19 @@ impl FederationReceiver for NoServer {
         let mut obj = std::collections::BTreeMap::new();
         obj.insert(
             "pdus".to_owned(),
+            crate::Json::Object(std::collections::BTreeMap::new()),
+        );
+        crate::Json::Object(obj)
+    }
+}
+
+impl ServerKeys for NoServer {
+    fn server_keys(&self) -> crate::Json {
+        // No server name and no keys configured: an empty key document.
+        let mut obj = std::collections::BTreeMap::new();
+        obj.insert("server_name".to_owned(), crate::Json::String(String::new()));
+        obj.insert(
+            "verify_keys".to_owned(),
             crate::Json::Object(std::collections::BTreeMap::new()),
         );
         crate::Json::Object(obj)

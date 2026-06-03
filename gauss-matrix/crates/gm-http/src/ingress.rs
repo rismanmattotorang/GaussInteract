@@ -39,7 +39,9 @@
 //! - `PUT /_matrix/federation/v1/send/{txnId}` → ingest an inbound federation
 //!   transaction (PDUs/EDUs), returning the per-PDU acknowledgement;
 //! - `GET /_matrix/federation/v1/state/{roomId}` → the room's current state as
-//!   `{"pdus":[…],"auth_chain":[…]}`.
+//!   `{"pdus":[…],"auth_chain":[…]}`;
+//! - `GET /_matrix/key/v2/server` → this server's published signing keys
+//!   (public, for remote servers to fetch and cache).
 //!
 //! Authentication is gated centrally: a request to an [`Auth::AccessToken`]
 //! endpoint without a token is `401 M_MISSING_TOKEN`, and a token the service
@@ -290,6 +292,10 @@ impl<H: Homeserver> Ingress<H> {
             }
             (Method::Post, "/_matrix/client/v3/createRoom") => self.serve_create_room(user, req),
             (Method::Get, "/_matrix/client/v3/sync") => self.serve_sync(user, req),
+            (Method::Get, "/_matrix/key/v2/server") => {
+                // Public: publish this server's signing keys for fetch + cache.
+                Response::json_ok(self.server.server_keys().to_string())
+            }
             (Method::Put, "/_matrix/federation/v1/send/{txnId}") => self.serve_federation_send(req),
             (Method::Get, "/_matrix/federation/v1/state/{roomId}") => {
                 self.serve_federation_state(m)
@@ -862,7 +868,7 @@ mod tests {
     use super::*;
     use gm_api::{
         FederationAuth, FederationReceiver, JoinedRoom, Login, MembershipChanger, MessageSender,
-        RoomCreator, RoomReader, RoomTimeline, SyncProvider, TokenAuthority,
+        RoomCreator, RoomReader, RoomTimeline, ServerKeys, SyncProvider, TokenAuthority,
     };
     use std::collections::BTreeMap;
 
@@ -982,6 +988,18 @@ mod tests {
             pdus.insert("$fed".to_owned(), Json::Object(BTreeMap::new()));
             let mut obj = BTreeMap::new();
             obj.insert("pdus".to_owned(), Json::Object(pdus));
+            Json::Object(obj)
+        }
+    }
+    impl ServerKeys for TestServer {
+        fn server_keys(&self) -> Json {
+            // A minimal, observable key document for the ingress wiring.
+            let mut obj = BTreeMap::new();
+            obj.insert(
+                "server_name".to_owned(),
+                Json::String("gaussian.tech".to_owned()),
+            );
+            obj.insert("verify_keys".to_owned(), Json::Object(BTreeMap::new()));
             Json::Object(obj)
         }
     }
@@ -1694,6 +1712,16 @@ mod tests {
     }
 
     const FED_SEND: &str = "/_matrix/federation/v1/send/txn-1";
+
+    #[test]
+    fn server_key_publishing_is_public_and_returns_the_key_document() {
+        // No Authorization header: the key endpoint is public.
+        let resp = authed().dispatch(Method::Get, "/_matrix/key/v2/server");
+        assert_eq!(resp.status, 200);
+        let parsed = Json::parse(&resp.body).unwrap();
+        assert!(parsed.get("server_name").and_then(Json::as_str).is_some());
+        assert!(parsed.get("verify_keys").is_some());
+    }
 
     #[test]
     fn federation_send_requires_an_x_matrix_signature() {
