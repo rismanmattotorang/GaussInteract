@@ -69,6 +69,11 @@ pub mod cf {
     /// User presence: `{user}` → `{presence}\u{1f}{status_msg}`, the user's
     /// status and optional message (§II, the `m.presence` ephemeral EDU).
     pub const PRESENCE: &str = "presence";
+    /// Cache of fetched federation verify keys (§III.E): `{origin}\u{1f}{key_id}`
+    /// → `{public}\u{1f}{valid_until_ts}`. Populated by ingesting a verified
+    /// `/_matrix/key/v2/server` document; an entry past `valid_until_ts` is
+    /// stale and must be re-fetched before it is trusted.
+    pub const KEY_CACHE: &str = "key_cache";
 }
 
 /// A backend-agnostic, column-family keyed store.
