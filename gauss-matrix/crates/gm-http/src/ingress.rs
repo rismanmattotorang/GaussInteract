@@ -33,6 +33,8 @@
 //! - `POST /_matrix/client/v3/createRoom` → originate a room, returning its id;
 //! - `POST /_matrix/client/v3/rooms/{roomId}/{join,leave,invite,kick,ban}` →
 //!   membership changes (authorized by the join-rules / power state machine);
+//! - `PUT /_matrix/client/v3/rooms/{roomId}/typing/{userId}` → set the caller's
+//!   typing state (surfaced as the `m.typing` ephemeral EDU on sync);
 //! - `GET /_matrix/client/v3/sync[?since=…]` → joined rooms with state and
 //!   timeline (full), or only the events since the `?since=` token plus rooms
 //!   left in the window (incremental);
@@ -271,6 +273,9 @@ impl<H: Homeserver> Ingress<H> {
             (Method::Put, "/_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}") => {
                 self.serve_send(m, user, req)
             }
+            (Method::Put, "/_matrix/client/v3/rooms/{roomId}/typing/{userId}") => {
+                self.serve_typing(m, user, req)
+            }
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/messages") => self.serve_messages(m),
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/event/{eventId}") => {
                 self.serve_event(m)
@@ -353,6 +358,57 @@ impl<H: Homeserver> Ingress<H> {
                 403,
                 &MatrixError::forbidden("not permitted to send in this room"),
             ),
+        }
+    }
+
+    /// `PUT /_matrix/client/v3/rooms/{roomId}/typing/{userId}`: set the
+    /// authenticated user's typing state in a room. The body is `{"typing":bool,
+    /// "timeout"?:ms}`; `typing` must be present. A user may only set their own
+    /// typing state (`{userId}` must be the caller), else `403`.
+    fn serve_typing(&self, m: &RouteMatch, user: Option<&UserId>, req: &Request<'_>) -> Response {
+        let Some(caller) = user else {
+            return Response::error(
+                401,
+                &MatrixError::unknown_token("unrecognized access token"),
+            );
+        };
+        let (Some(room_id), Some(user_id)) = (m.param("roomId"), m.param("userId")) else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let Ok(room) = RoomId::parse(room_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        // A user may only change their own typing state.
+        if user_id != caller.as_str() {
+            return Response::error(
+                403,
+                &MatrixError::forbidden("cannot set another user's typing state"),
+            );
+        }
+        let Ok(Json::Object(body)) = Json::parse(req.body.unwrap_or("")) else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_BAD_JSON", "body must be an object"),
+            );
+        };
+        let Some(typing) = body.get("typing").and_then(Json::as_bool) else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_BAD_JSON", "missing boolean `typing`"),
+            );
+        };
+        // `timeout` is the requested lifetime in ms (default 30s) when typing.
+        let timeout_ms = body.get("timeout").and_then(Json::as_u64).unwrap_or(30_000);
+        if self.server.set_typing(caller, &room, typing, timeout_ms) {
+            Response::json_ok("{}".to_owned())
+        } else {
+            Response::error(
+                403,
+                &MatrixError::forbidden("not permitted to set typing in this room"),
+            )
         }
     }
 
@@ -759,9 +815,35 @@ fn room_id_body(room_id: &str) -> String {
     Json::Object(obj).to_string()
 }
 
+/// The `ephemeral` block of a joined room: an `{"events":[…]}` carrying the
+/// `m.typing` EDU when anyone is typing (omitted-as-empty otherwise).
+fn ephemeral_obj(typing: &[gm_util::UserId]) -> BTreeMap<String, Json> {
+    let mut events = Vec::new();
+    if !typing.is_empty() {
+        let mut content = BTreeMap::new();
+        content.insert(
+            "user_ids".to_owned(),
+            Json::Array(
+                typing
+                    .iter()
+                    .map(|u| Json::String(u.as_str().to_owned()))
+                    .collect(),
+            ),
+        );
+        let mut edu = BTreeMap::new();
+        edu.insert("type".to_owned(), Json::String("m.typing".to_owned()));
+        edu.insert("content".to_owned(), Json::Object(content));
+        events.push(Json::Object(edu));
+    }
+    let mut o = BTreeMap::new();
+    o.insert("events".to_owned(), Json::Array(events));
+    o
+}
+
 /// The `GET /sync` body:
 /// `{"next_batch":…,"rooms":{"join":{room:{"state":{"events":[…]},
-/// "timeline":{"events":[…],"limited":false}}},"leave":{room:{"timeline":…}}}}`.
+/// "timeline":{"events":[…],"limited":false},"ephemeral":{"events":[…]}}},
+/// "leave":{room:{"timeline":…}}}}`.
 fn sync_body(view: &SyncView) -> String {
     let events_obj = |events: &[Pdu]| {
         let mut o = BTreeMap::new();
@@ -779,6 +861,10 @@ fn sync_body(view: &SyncView) -> String {
         let mut room = BTreeMap::new();
         room.insert("state".to_owned(), Json::Object(events_obj(&jr.state)));
         room.insert("timeline".to_owned(), Json::Object(timeline));
+        room.insert(
+            "ephemeral".to_owned(),
+            Json::Object(ephemeral_obj(&jr.typing)),
+        );
         join.insert(jr.room.as_str().to_owned(), Json::Object(room));
     }
 
@@ -869,6 +955,7 @@ mod tests {
     use gm_api::{
         FederationAuth, FederationReceiver, JoinedRoom, Login, MembershipChanger, MessageSender,
         RoomCreator, RoomReader, RoomTimeline, ServerKeys, SyncProvider, TokenAuthority,
+        TypingNotifier,
     };
     use std::collections::BTreeMap;
 
@@ -1003,6 +1090,18 @@ mod tests {
             Json::Object(obj)
         }
     }
+    impl TypingNotifier for TestServer {
+        fn set_typing(
+            &self,
+            user: &UserId,
+            _room: &RoomId,
+            _typing: bool,
+            _timeout_ms: u64,
+        ) -> bool {
+            // The double accepts typing for its own configured user.
+            user.as_str() == self.user
+        }
+    }
     impl SyncProvider for TestServer {
         fn sync(&self, _user: &UserId, _since: Option<&str>) -> gm_api::SyncView {
             // One joined room carrying the double's timeline (no state).
@@ -1013,6 +1112,7 @@ mod tests {
                     room: RoomId::parse("!room:gaussian.tech").unwrap(),
                     state: Vec::new(),
                     timeline: self.timeline.clone(),
+                    typing: Vec::new(),
                 }]
             };
             gm_api::SyncView {
@@ -1694,6 +1794,69 @@ mod tests {
             events[0].get("event_id").and_then(Json::as_str),
             Some("$e1")
         );
+    }
+
+    #[test]
+    fn joined_room_sync_carries_an_ephemeral_block() {
+        let req = Request::new(Method::Get, "/_matrix/client/v3/sync")
+            .with_authorization("Bearer tok123");
+        let resp = server_with_timeline().handle(&req);
+        let body = Json::parse(&resp.body).unwrap();
+        let room = body
+            .get("rooms")
+            .and_then(|r| r.get("join"))
+            .and_then(|j| j.get("!room:gaussian.tech"))
+            .expect("the joined room");
+        // The ephemeral block is always present (empty events when no typing).
+        let events = room
+            .get("ephemeral")
+            .and_then(|e| e.get("events"))
+            .and_then(Json::as_array)
+            .expect("an ephemeral.events array");
+        assert!(events.is_empty());
+    }
+
+    const TYPING_TARGET: &str =
+        "/_matrix/client/v3/rooms/!room:gaussian.tech/typing/@alice:gaussian.tech";
+
+    #[test]
+    fn typing_for_self_is_accepted() {
+        let req = Request::new(Method::Put, TYPING_TARGET)
+            .with_authorization("Bearer tok123")
+            .with_body(r#"{"typing":true,"timeout":30000}"#);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, "{}");
+    }
+
+    #[test]
+    fn typing_for_another_user_is_forbidden() {
+        let req = Request::new(
+            Method::Put,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/typing/@bob:gaussian.tech",
+        )
+        .with_authorization("Bearer tok123")
+        .with_body(r#"{"typing":true}"#);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 403);
+        assert!(resp.body.contains("\"errcode\":\"M_FORBIDDEN\""));
+    }
+
+    #[test]
+    fn typing_without_a_boolean_is_400() {
+        let req = Request::new(Method::Put, TYPING_TARGET)
+            .with_authorization("Bearer tok123")
+            .with_body(r#"{"timeout":30000}"#);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("\"errcode\":\"M_BAD_JSON\""));
+    }
+
+    #[test]
+    fn typing_requires_authentication() {
+        let resp = authed().dispatch(Method::Put, TYPING_TARGET);
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
     }
 
     #[test]

@@ -167,6 +167,10 @@ static SURFACE: &[Endpoint] = &[
     ),
     Endpoint::cs(
         Method::Put,
+        "/_matrix/client/v3/rooms/{roomId}/typing/{userId}",
+    ),
+    Endpoint::cs(
+        Method::Put,
         "/_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}",
     ),
     Endpoint::cs(Method::Post, "/_matrix/client/v3/keys/upload"),
