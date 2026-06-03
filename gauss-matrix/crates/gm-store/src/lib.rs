@@ -59,6 +59,10 @@ pub mod cf {
     /// material, published at `GET /_matrix/key/v2/server` and used to sign
     /// outbound requests. A scaffold stand-in for an Ed25519 keypair.
     pub const SERVER_KEYS: &str = "server_keys";
+    /// Ephemeral typing state: `{room}\u{1f}{user}` → expiry timestamp (ms since
+    /// epoch). An entry whose expiry has passed is treated as not typing (§II,
+    /// the `m.typing` ephemeral EDU).
+    pub const TYPING: &str = "typing";
 }
 
 /// A backend-agnostic, column-family keyed store.

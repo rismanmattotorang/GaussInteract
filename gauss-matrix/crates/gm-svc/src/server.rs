@@ -19,7 +19,7 @@ use gm_api::events;
 use gm_api::{
     FederationAuth, FederationReceiver, JoinedRoom, Json, Login, LoginGrant, MembershipChanger,
     MessageSender, Pdu, RoomCreator, RoomReader, RoomTimeline, RoomVersion, ServerKeys,
-    SyncProvider, SyncView, TokenAuthority,
+    SyncProvider, SyncView, TokenAuthority, TypingNotifier,
 };
 use gm_fed::{auth as fed_auth, Transaction};
 use gm_store::{cf, Store};
@@ -30,6 +30,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Delimiter for the `(sender, txn_id)` transaction key.
 const TXN_SEP: char = '\u{1f}';
+
+/// The longest a typing notification is honoured (ms), capping the client's
+/// requested timeout so a stuck client cannot pin itself as typing forever.
+const MAX_TYPING_MS: u64 = 30_000;
 
 /// The composed homeserver: one shared store, one server name, all services.
 #[derive(Debug, Clone)]
@@ -111,6 +115,28 @@ impl<S: Store + Clone> GaussServer<S> {
             == Some("join")
     }
 
+    /// The users currently typing in `room` (those whose typing entry has not
+    /// yet expired), in id order. Backs the `m.typing` ephemeral EDU on sync.
+    fn typing_users(&self, room: &RoomId) -> Vec<UserId> {
+        let prefix = format!("{}{TXN_SEP}", room.as_str());
+        let now = now_ms();
+        let mut users: Vec<UserId> = self
+            .store
+            .scan(cf::TYPING)
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let user = key.strip_prefix(&prefix)?;
+                let expiry: u64 = String::from_utf8(value).ok()?.parse().ok()?;
+                if expiry <= now {
+                    return None; // lapsed
+                }
+                UserId::parse(user).ok()
+            })
+            .collect();
+        users.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        users
+    }
+
     /// Mint a fresh room id on this server. Uniqueness (scaffold) comes from the
     /// creator, the live event count and the clock; production uses a CSPRNG.
     fn mint_room_id(&self, creator: &UserId) -> Option<RoomId> {
@@ -181,6 +207,7 @@ impl<S: Store + Clone> SyncProvider for GaussServer<S> {
                     .map(|room| JoinedRoom {
                         state: rooms.current_state_pdus(&room),
                         timeline: rooms.timeline(&room),
+                        typing: self.typing_users(&room),
                         room,
                     })
                     .collect();
@@ -215,10 +242,12 @@ impl<S: Store + Clone> SyncProvider for GaussServer<S> {
                         } else {
                             timeline.iter().filter(|p| p.is_state()).cloned().collect()
                         };
+                        let typing = self.typing_users(&room);
                         joined.push(JoinedRoom {
                             room,
                             state,
                             timeline,
+                            typing,
                         });
                     } else if left_in_delta(&timeline, user) {
                         // The user's own membership became `leave`/`ban` in this
@@ -504,6 +533,26 @@ impl<S: Store + Clone> MessageSender for GaussServer<S> {
         let mut store = self.store.clone();
         store.put(cf::TRANSACTIONS, &txn_key, event_id.as_bytes());
         Some(event_id)
+    }
+}
+
+impl<S: Store + Clone> TypingNotifier for GaussServer<S> {
+    fn set_typing(&self, user: &UserId, room: &RoomId, typing: bool, timeout_ms: u64) -> bool {
+        // Only a user joined to the room may signal typing in it.
+        let rooms = RoomService::new(self.store.clone());
+        if !self.is_joined(&rooms, room, user) {
+            return false;
+        }
+        let key = format!("{}{TXN_SEP}{}", room.as_str(), user.as_str());
+        let mut store = self.store.clone();
+        if typing {
+            // Mark typing until now + timeout (capped so a client cannot pin it).
+            let expiry = now_ms() + timeout_ms.min(MAX_TYPING_MS);
+            store.put(cf::TYPING, &key, expiry.to_string().as_bytes());
+        } else {
+            store.delete(cf::TYPING, &key);
+        }
+        true
     }
 }
 
@@ -856,6 +905,46 @@ mod tests {
         let after = s.sync(&bob, Some(&delta.next_batch));
         assert!(after.joined.is_empty());
         assert!(after.left.is_empty());
+    }
+
+    #[test]
+    fn typing_is_surfaced_on_sync_and_cleared_on_stop() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let bob = UserId::parse("@bob:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+        s.change_membership(&alice, &room, &bob, "invite").unwrap();
+        s.change_membership(&bob, &room, &bob, "join").unwrap();
+
+        // A non-member cannot signal typing.
+        let carol = UserId::parse("@carol:gaussian.tech").unwrap();
+        assert!(!s.set_typing(&carol, &room, true, 30_000));
+
+        // alice and bob start typing; both surface on alice's sync.
+        assert!(s.set_typing(&alice, &room, true, 30_000));
+        assert!(s.set_typing(&bob, &room, true, 30_000));
+        let view = s.sync(&alice, None);
+        let jr = view.joined.iter().find(|j| j.room == room).unwrap();
+        assert_eq!(jr.typing, vec![alice.clone(), bob.clone()]);
+
+        // bob stops; only alice remains typing.
+        assert!(s.set_typing(&bob, &room, false, 0));
+        let jr = s.sync(&alice, None);
+        let jr = jr.joined.iter().find(|j| j.room == room).unwrap();
+        assert_eq!(jr.typing, vec![alice.clone()]);
+    }
+
+    #[test]
+    fn typing_lapses_after_its_timeout() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+
+        // A zero (already-elapsed) timeout is treated as not typing.
+        assert!(s.set_typing(&alice, &room, true, 0));
+        let view = s.sync(&alice, None);
+        let jr = view.joined.iter().find(|j| j.room == room).unwrap();
+        assert!(jr.typing.is_empty());
     }
 
     #[test]

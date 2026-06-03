@@ -37,7 +37,8 @@ pub trait RoomTimeline {
     fn room_timeline(&self, room: &RoomId) -> Vec<Pdu>;
 }
 
-/// One joined room in a [`SyncView`]: its current state and recent timeline.
+/// One joined room in a [`SyncView`]: its current state, recent timeline, and
+/// ephemeral data (currently the set of users typing).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinedRoom {
     /// The room.
@@ -46,6 +47,8 @@ pub struct JoinedRoom {
     pub state: Vec<Pdu>,
     /// The room's timeline, oldest first.
     pub timeline: Vec<Pdu>,
+    /// The users currently typing in the room (the `m.typing` ephemeral EDU).
+    pub typing: Vec<UserId>,
 }
 
 /// One room a user left within a sync window: the timeline up to and including
@@ -199,6 +202,18 @@ pub trait MessageSender {
     ) -> Option<String>;
 }
 
+/// Set a user's typing state in a room (the `PUT …/typing/{userId}` path).
+///
+/// Typing is ephemeral: `typing = true` marks `user` as typing in `room` for
+/// `timeout_ms` milliseconds (after which it lapses); `typing = false` clears it
+/// immediately. The state surfaces as the `m.typing` ephemeral EDU on the room's
+/// sync view. Takes `&self` (interior mutability), like the other writes. Returns
+/// whether the change was accepted.
+pub trait TypingNotifier {
+    /// Set whether `user` is typing in `room`, lapsing after `timeout_ms`.
+    fn set_typing(&self, user: &UserId, room: &RoomId, typing: bool, timeout_ms: u64) -> bool;
+}
+
 /// The full capability set the ingress requires of a homeserver. Blanket-
 /// implemented: any type providing all the capability traits is a `Homeserver`.
 pub trait Homeserver:
@@ -209,6 +224,7 @@ pub trait Homeserver:
     + MembershipChanger
     + Login
     + MessageSender
+    + TypingNotifier
     + SyncProvider
     + FederationReceiver
     + FederationAuth
@@ -224,6 +240,7 @@ impl<T> Homeserver for T where
         + MembershipChanger
         + Login
         + MessageSender
+        + TypingNotifier
         + SyncProvider
         + FederationReceiver
         + FederationAuth
@@ -351,6 +368,12 @@ impl MessageSender for NoServer {
         _content: &str,
     ) -> Option<String> {
         None
+    }
+}
+
+impl TypingNotifier for NoServer {
+    fn set_typing(&self, _user: &UserId, _room: &RoomId, _typing: bool, _timeout_ms: u64) -> bool {
+        false
     }
 }
 
