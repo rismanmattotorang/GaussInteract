@@ -17,6 +17,7 @@
 //! - `GET /_matrix/client/v3/login` → the supported login flows;
 //! - `POST /_matrix/client/v3/login` → password login, returning an access token;
 //! - `GET /_matrix/client/v3/account/whoami` → the token's user;
+//! - `GET /_matrix/client/v3/rooms/{roomId}/state` → the room's full state;
 //! - `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}[/{stateKey}]` → the
 //!   content of a state event;
 //! - `PUT /_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}` → send a
@@ -250,6 +251,7 @@ impl<H: Homeserver> Ingress<H> {
                     ),
                 }
             }
+            (Method::Get, "/_matrix/client/v3/rooms/{roomId}/state") => self.serve_room_state(m),
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}")
             | (Method::Get, "/_matrix/client/v3/rooms/{roomId}/state/{eventType}") => {
                 self.serve_state_event(m)
@@ -519,6 +521,23 @@ impl<H: Homeserver> Ingress<H> {
             return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
         };
         Response::json_ok(messages_body(&self.server.room_timeline(&room)))
+    }
+
+    /// `GET /_matrix/client/v3/rooms/{roomId}/state`: return the room's full
+    /// current state as a bare JSON array of state events. A malformed room id
+    /// is `400`; an unknown room is simply an empty array.
+    fn serve_room_state(&self, m: &RouteMatch) -> Response {
+        let Some(room_id) = m.param("roomId") else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let Ok(room) = RoomId::parse(room_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        let state = self.server.room_state(&room);
+        Response::json_ok(Json::Array(state.iter().map(Pdu::to_json).collect()).to_string())
     }
 
     /// `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}[/{stateKey}]`:
@@ -1136,6 +1155,35 @@ mod tests {
         let resp = server_with_room_name().dispatch(
             Method::Get,
             "/_matrix/client/v3/rooms/!room:gaussian.tech/state/m.room.name",
+        );
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
+    }
+
+    #[test]
+    fn full_room_state_read_returns_an_array_of_events() {
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/state",
+        )
+        .with_authorization("Bearer tok123");
+        // The double's room_state echoes its seeded events as the full state.
+        let resp = server_with_timeline().handle(&req);
+        assert_eq!(resp.status, 200);
+        let parsed = Json::parse(&resp.body).unwrap();
+        let events = parsed.as_array().expect("a bare JSON array of events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].get("event_id").and_then(Json::as_str),
+            Some("$e1")
+        );
+    }
+
+    #[test]
+    fn full_room_state_read_requires_authentication() {
+        let resp = server_with_timeline().dispatch(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/state",
         );
         assert_eq!(resp.status, 401);
         assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
