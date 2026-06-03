@@ -46,6 +46,8 @@
 //!   transaction (PDUs/EDUs), returning the per-PDU acknowledgement;
 //! - `GET /_matrix/federation/v1/state/{roomId}` → the room's current state as
 //!   `{"pdus":[…],"auth_chain":[…]}`;
+//! - `GET /_matrix/federation/v1/backfill/{roomId}` → historical events at or
+//!   before the `v` events as `{"pdus":[…]}`;
 //! - `GET /_matrix/key/v2/server` → this server's published signing keys
 //!   (public, for remote servers to fetch and cache).
 //!
@@ -317,6 +319,9 @@ impl<H: Homeserver> Ingress<H> {
             (Method::Put, "/_matrix/federation/v1/send/{txnId}") => self.serve_federation_send(req),
             (Method::Get, "/_matrix/federation/v1/state/{roomId}") => {
                 self.serve_federation_state(m)
+            }
+            (Method::Get, "/_matrix/federation/v1/backfill/{roomId}") => {
+                self.serve_federation_backfill(m, req)
             }
             _ => Response::error(
                 501,
@@ -693,6 +698,32 @@ impl<H: Homeserver> Ingress<H> {
             Json::Array(state.iter().map(Pdu::to_json).collect()),
         );
         obj.insert("auth_chain".to_owned(), Json::Array(Vec::new()));
+        Response::json_ok(Json::Object(obj).to_string())
+    }
+
+    /// `GET /_matrix/federation/v1/backfill/{roomId}?v=<eventId>&limit=N`: serve
+    /// up to `limit` (default 10) historical events at or before the `v` events,
+    /// most recent first, as `{"pdus":[…]}`. A malformed room id is `400`.
+    fn serve_federation_backfill(&self, m: &RouteMatch, req: &Request<'_>) -> Response {
+        let Some(room_id) = m.param("roomId") else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let Ok(room) = RoomId::parse(room_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        let from = crate::auth::query_params_all(req.target, "v");
+        let limit = crate::auth::query_param(req.target, "limit")
+            .and_then(|l| l.parse::<usize>().ok())
+            .unwrap_or(10);
+        let pdus = self.server.backfill(&room, &from, limit);
+        let mut obj = BTreeMap::new();
+        obj.insert(
+            "pdus".to_owned(),
+            Json::Array(pdus.iter().map(Pdu::to_json).collect()),
+        );
         Response::json_ok(Json::Object(obj).to_string())
     }
 
@@ -1131,9 +1162,9 @@ fn json_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use gm_api::{
-        FederationAuth, FederationReceiver, JoinedRoom, Login, MembershipChanger, MessageSender,
-        PresenceStore, ReceiptSetter, RoomCreator, RoomReader, RoomTimeline, ServerKeys,
-        SyncProvider, TokenAuthority, TypingNotifier,
+        Backfill, FederationAuth, FederationReceiver, JoinedRoom, Login, MembershipChanger,
+        MessageSender, PresenceStore, ReceiptSetter, RoomCreator, RoomReader, RoomTimeline,
+        ServerKeys, SyncProvider, TokenAuthority, TypingNotifier,
     };
     use std::collections::BTreeMap;
 
@@ -1254,6 +1285,15 @@ mod tests {
             let mut obj = BTreeMap::new();
             obj.insert("pdus".to_owned(), Json::Object(pdus));
             Json::Object(obj)
+        }
+    }
+    impl Backfill for TestServer {
+        fn backfill(&self, _room: &RoomId, _from: &[String], limit: usize) -> Vec<Pdu> {
+            // The double returns its seeded timeline (most recent first), capped.
+            let mut pdus = self.timeline.clone();
+            pdus.reverse();
+            pdus.truncate(limit);
+            pdus
         }
     }
     impl ServerKeys for TestServer {
@@ -2212,6 +2252,38 @@ mod tests {
         assert_eq!(resp.status, 200);
         // The acknowledgement carries the per-PDU result object.
         assert!(Json::parse(&resp.body).unwrap().get("pdus").is_some());
+    }
+
+    #[test]
+    fn federation_backfill_returns_pdus_for_a_signed_request() {
+        // The backfill endpoint is federation-signed; the double trusts a
+        // well-formed X-Matrix header and returns its seeded history.
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/federation/v1/backfill/!room:gaussian.tech?v=$e2&limit=10",
+        )
+        .with_authorization("X-Matrix origin=other.tld,key=\"ed25519:1\",sig=\"abc\"");
+        let resp = server_with_timeline().handle(&req);
+        assert_eq!(resp.status, 200);
+        let pdus = Json::parse(&resp.body)
+            .unwrap()
+            .get("pdus")
+            .and_then(Json::as_array)
+            .map(<[_]>::to_vec)
+            .expect("a pdus array");
+        assert_eq!(pdus.len(), 2);
+        // Most recent first.
+        assert_eq!(pdus[0].get("event_id").and_then(Json::as_str), Some("$e2"));
+    }
+
+    #[test]
+    fn federation_backfill_requires_a_signature() {
+        let resp = authed().dispatch(
+            Method::Get,
+            "/_matrix/federation/v1/backfill/!room:gaussian.tech",
+        );
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("M_UNAUTHORIZED"));
     }
 
     #[test]
