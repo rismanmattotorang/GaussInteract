@@ -243,14 +243,15 @@ const FED_TXN: &str = concat!(
 );
 const FED_TARGET: &str = "/_matrix/federation/v1/send/txn-A-1";
 
-/// Build the `X-Matrix` header for the federation transaction, signed with `key`.
-fn signed_fed_header(key: &str) -> String {
+/// Build the `X-Matrix` header for the federation transaction, signed with the
+/// base64 secret `seed`.
+fn signed_fed_header(seed: &str) -> String {
     let bytes = gm_fed::auth::signing_bytes("PUT", FED_TARGET, "a.tld", "b.tld", Some(FED_TXN));
     gm_fed::auth::XMatrixAuth {
         origin: "a.tld".to_owned(),
         destination: Some("b.tld".to_owned()),
         key_id: "ed25519:1".to_owned(),
-        signature: gm_fed::auth::sign(&bytes, key),
+        signature: gm_fed::auth::sign(&bytes, seed),
     }
     .to_header()
 }
@@ -348,16 +349,18 @@ fn two_users_converse_after_an_invite_and_join() {
 
 #[test]
 fn federation_send_delivers_a_signed_event_between_two_servers_over_tcp() {
-    // Node B: a real homeserver that has registered node A's federation key.
+    // Node A holds a secret seed; node B registers A's derived public key.
+    let a_seed = gm_fed::ed25519::seed_from_material("a.tld:ed25519:1");
+    let a_public = gm_fed::ed25519::public_key_b64(&a_seed).unwrap();
     let store_b = SharedStore::new();
     let server_b = GaussServer::new(store_b.clone(), "b.tld");
-    server_b.register_federation_key("a.tld", "a-fed-key");
+    server_b.register_federation_key("a.tld", &a_public);
     let ingress_b = Ingress::with_server(server_b);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
-    // Node A signs the transaction with its key and delivers it (sender side).
-    let header = signed_fed_header("a-fed-key");
+    // Node A signs the transaction with its secret seed and delivers it.
+    let header = signed_fed_header(&a_seed);
     let sender =
         thread::spawn(move || transport::deliver_transaction(addr, "txn-A-1", &header, FED_TXN));
 
@@ -383,15 +386,18 @@ fn federation_send_delivers_a_signed_event_between_two_servers_over_tcp() {
 
 #[test]
 fn federation_send_with_a_bad_signature_is_rejected_and_ingests_nothing() {
+    let a_seed = gm_fed::ed25519::seed_from_material("a.tld:ed25519:1");
+    let a_public = gm_fed::ed25519::public_key_b64(&a_seed).unwrap();
     let store_b = SharedStore::new();
     let server_b = GaussServer::new(store_b.clone(), "b.tld");
-    server_b.register_federation_key("a.tld", "a-fed-key");
+    server_b.register_federation_key("a.tld", &a_public);
     let ingress_b = Ingress::with_server(server_b);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
-    // A signs with the WRONG key — B's verification fails.
-    let header = signed_fed_header("not-a-fed-key");
+    // A signs with the WRONG seed — B's verification fails.
+    let wrong_seed = gm_fed::ed25519::seed_from_material("a.tld:wrong");
+    let header = signed_fed_header(&wrong_seed);
     let sender =
         thread::spawn(move || transport::deliver_transaction(addr, "txn-A-1", &header, FED_TXN));
 

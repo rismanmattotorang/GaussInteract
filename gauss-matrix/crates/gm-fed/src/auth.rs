@@ -13,19 +13,17 @@
 //! This module parses that header ([`XMatrixAuth`]), builds the canonical
 //! [`signing_bytes`] a request is signed over, and [`sign`]/[`verify`] them.
 //!
-//! ## Note on the signature scheme
+//! ## Signature scheme
 //!
-//! The scaffold signs with a **symmetric keyed hash** (std-only), so the
-//! verifier holds the origin server's key — a per-server key registry standing
-//! in for the published-key fetch (`/_matrix/key/v2/server`). Production uses
-//! **Ed25519** (asymmetric): the verifier holds only the origin's *public* key.
-//! The header shape, the canonical signing object, and the
-//! [`sign`]/[`verify`] contract are unchanged either way (mirroring the audit
-//! log's placeholder-hash note).
+//! Signing is **Ed25519** (RFC 8032, see [`crate::ed25519`]): a server signs
+//! with its 32-byte secret seed and the verifier holds only the origin's
+//! 32-byte *public* key, fetched from `/_matrix/key/v2/server`. Keys and
+//! signatures cross the wire as **unpadded base64**, so [`sign`] takes a base64
+//! secret seed and [`verify`] takes a base64 public key.
 
+use crate::ed25519;
 use gm_api::Json;
 use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
 
 /// A parsed `X-Matrix` authorization header.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,21 +151,16 @@ pub fn signing_bytes(
     Json::Object(obj).to_string().into_bytes()
 }
 
-/// Sign `bytes` with `key`, returning the signature string. (Scaffold: a keyed
-/// hash; production: Ed25519 over the same canonical bytes.)
-pub fn sign(bytes: &[u8], key: &str) -> String {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut h);
-    0x5Au8.hash(&mut h); // domain separator between key and message
-    bytes.hash(&mut h);
-    format!("sig1:{:016x}", h.finish())
+/// Sign `bytes` with the base64 secret `seed`, returning the base64 Ed25519
+/// signature (the empty string if the seed is not a 32-byte base64 value).
+pub fn sign(bytes: &[u8], seed: &str) -> String {
+    ed25519::sign_b64(bytes, seed)
 }
 
-/// Verify that `signature` is a valid signature over `bytes` under `key`.
-pub fn verify(bytes: &[u8], signature: &str, key: &str) -> bool {
-    // Constant-work compare is unnecessary for the scaffold's non-secret hash;
-    // production's Ed25519 verify is constant-time by construction.
-    sign(bytes, key) == signature
+/// Verify that `signature` (base64) is a valid Ed25519 signature over `bytes`
+/// under the base64 `public_key`.
+pub fn verify(bytes: &[u8], signature: &str, public_key: &str) -> bool {
+    ed25519::verify_b64(bytes, signature, public_key)
 }
 
 #[cfg(test)]
@@ -206,7 +199,9 @@ mod tests {
 
     #[test]
     fn sign_then_verify_round_trips_and_detects_tampering() {
-        let key = "server-secret-key";
+        // Asymmetric: sign with the secret seed, verify with the public key.
+        let seed = ed25519::seed_from_material("a.tld:ed25519:1");
+        let public = ed25519::public_key_b64(&seed).unwrap();
         let bytes = signing_bytes(
             "PUT",
             "/_matrix/federation/v1/send/t1",
@@ -214,13 +209,14 @@ mod tests {
             "b.tld",
             Some(r#"{"pdus":[]}"#),
         );
-        let sig = sign(&bytes, key);
-        assert!(verify(&bytes, &sig, key));
+        let sig = sign(&bytes, &seed);
+        assert!(verify(&bytes, &sig, &public));
         // Wrong key, tampered bytes, or tampered signature all fail.
-        assert!(!verify(&bytes, &sig, "other-key"));
+        let other_public = ed25519::public_key_b64(&ed25519::seed_from_material("evil")).unwrap();
+        assert!(!verify(&bytes, &sig, &other_public));
         let other = signing_bytes("PUT", "/different/uri", "a.tld", "b.tld", Some("{}"));
-        assert!(!verify(&other, &sig, key));
-        assert!(!verify(&bytes, "sig1:0000000000000000", key));
+        assert!(!verify(&other, &sig, &public));
+        assert!(!verify(&bytes, "AAAA", &public));
     }
 
     #[test]

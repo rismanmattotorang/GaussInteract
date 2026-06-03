@@ -69,14 +69,15 @@ impl<S: Store + Clone> GaussServer<S> {
         RoomService::new(self.store.clone()).append(pdu);
     }
 
-    /// Register `origin`'s federation signing key, so requests it signs verify.
-    /// Setup/operational helper standing in for the published-key fetch.
-    pub fn register_federation_key(&self, origin: &str, key: &str) {
+    /// Register `origin`'s federation **public** key (base64), so Ed25519
+    /// signatures it produces verify. Setup/operational helper standing in for
+    /// the published-key fetch (`/_matrix/key/v2/server`).
+    pub fn register_federation_key(&self, origin: &str, public_key: &str) {
         let mut store = self.store.clone();
-        store.put(cf::FEDERATION_KEYS, origin, key.as_bytes());
+        store.put(cf::FEDERATION_KEYS, origin, public_key.as_bytes());
     }
 
-    /// The registered federation key for `origin`, if any.
+    /// The registered federation public key for `origin`, if any.
     fn federation_key(&self, origin: &str) -> Option<String> {
         self.store
             .get(cf::FEDERATION_KEYS, origin)
@@ -84,13 +85,17 @@ impl<S: Store + Clone> GaussServer<S> {
     }
 
     /// Register one of this server's own signing keys under `key_id` (e.g.
-    /// `ed25519:1`), published at `GET /_matrix/key/v2/server`. Also registers it
-    /// as this server's federation key so the server can verify its own
-    /// signatures. Setup helper standing in for an Ed25519 keypair.
-    pub fn register_signing_key(&self, key_id: &str, key: &str) {
+    /// `ed25519:1`). `seed` is the base64 32-byte Ed25519 secret seed (see
+    /// [`gm_fed::ed25519::seed_from_material`] to derive one). The seed is stored
+    /// for signing and published at `GET /_matrix/key/v2/server` as its derived
+    /// **public** key; that public key is also registered under this server's
+    /// name so the server can verify its own signatures.
+    pub fn register_signing_key(&self, key_id: &str, seed: &str) {
         let mut store = self.store.clone();
-        store.put(cf::SERVER_KEYS, key_id, key.as_bytes());
-        store.put(cf::FEDERATION_KEYS, &self.server_name, key.as_bytes());
+        store.put(cf::SERVER_KEYS, key_id, seed.as_bytes());
+        if let Some(public) = gm_fed::ed25519::public_key_b64(seed) {
+            store.put(cf::FEDERATION_KEYS, &self.server_name, public.as_bytes());
+        }
     }
 
     /// The room's timeline, oldest first.
@@ -358,14 +363,18 @@ impl<S: Store + Clone> FederationReceiver for GaussServer<S> {
 
 impl<S: Store + Clone> ServerKeys for GaussServer<S> {
     fn server_keys(&self) -> Json {
-        // verify_keys: { "<key_id>": { "key": "<material>" } } for every own key.
+        // verify_keys: { "<key_id>": { "key": "<public>" } } — the public key
+        // derived from each stored secret seed.
         let mut verify_keys = BTreeMap::new();
         for (key_id, value) in self.store.scan(cf::SERVER_KEYS) {
-            let Ok(material) = String::from_utf8(value) else {
+            let Some(public) = String::from_utf8(value)
+                .ok()
+                .and_then(|seed| gm_fed::ed25519::public_key_b64(&seed))
+            else {
                 continue;
             };
             let mut entry = BTreeMap::new();
-            entry.insert("key".to_owned(), Json::String(material));
+            entry.insert("key".to_owned(), Json::String(public));
             verify_keys.insert(key_id, Json::Object(entry));
         }
 
@@ -384,15 +393,16 @@ impl<S: Store + Clone> ServerKeys for GaussServer<S> {
         doc.insert("old_verify_keys".to_owned(), Json::Object(BTreeMap::new()));
         doc.insert("verify_keys".to_owned(), Json::Object(verify_keys.clone()));
 
-        // Self-sign the canonical (signatures-free) document with each own key,
-        // so a fetcher can verify the document against the key it advertises.
+        // Self-sign the canonical (signatures-free) document with each own
+        // secret seed, so a fetcher can verify the document against the public
+        // key it advertises.
         let signing_bytes = Json::Object(doc.clone()).to_string();
         let mut by_key = BTreeMap::new();
         for (key_id, value) in self.store.scan(cf::SERVER_KEYS) {
-            if let Ok(material) = String::from_utf8(value) {
+            if let Ok(seed) = String::from_utf8(value) {
                 by_key.insert(
                     key_id,
-                    Json::String(fed_auth::sign(signing_bytes.as_bytes(), &material)),
+                    Json::String(fed_auth::sign(signing_bytes.as_bytes(), &seed)),
                 );
             }
         }
@@ -1111,29 +1121,44 @@ mod tests {
     #[test]
     fn server_keys_publishes_registered_keys_and_self_signs() {
         let s = GaussServer::new(SharedStore::new(), "b.tld");
-        s.register_signing_key("ed25519:1", "secret-key");
+        let seed = gm_fed::ed25519::seed_from_material("b.tld:ed25519:1");
+        let expected_public = gm_fed::ed25519::public_key_b64(&seed).unwrap();
+        s.register_signing_key("ed25519:1", &seed);
 
         let doc = s.server_keys();
         assert_eq!(doc.get("server_name").and_then(Json::as_str), Some("b.tld"));
-        // The verify key is published under its key id.
+        // The published verify key is the public key derived from the seed —
+        // never the secret seed itself.
         let key = doc
             .get("verify_keys")
             .and_then(|v| v.get("ed25519:1"))
             .and_then(|e| e.get("key"))
             .and_then(Json::as_str);
-        assert_eq!(key, Some("secret-key"));
+        assert_eq!(key, Some(expected_public.as_str()));
+        assert_ne!(key, Some(seed.as_str()));
         // valid_until_ts is a future timestamp.
         assert!(doc
             .get("valid_until_ts")
             .and_then(Json::as_u64)
             .is_some_and(|ts| ts > 0));
-        // The document self-signs under server_name -> key id.
-        assert!(doc
+        // The self-signature verifies against the published public key over the
+        // canonical (signatures-free) document.
+        let sig = doc
             .get("signatures")
             .and_then(|s| s.get("b.tld"))
             .and_then(|s| s.get("ed25519:1"))
             .and_then(Json::as_str)
-            .is_some());
+            .expect("a self-signature");
+        let mut unsigned = doc.clone();
+        if let Json::Object(map) = &mut unsigned {
+            map.remove("signatures");
+        }
+        let canonical = unsigned.to_string();
+        assert!(gm_fed::ed25519::verify_b64(
+            canonical.as_bytes(),
+            sig,
+            &expected_public
+        ));
     }
 
     #[test]
@@ -1150,7 +1175,10 @@ mod tests {
     #[test]
     fn verify_federation_request_checks_the_signature_against_the_registered_key() {
         let s = GaussServer::new(SharedStore::new(), "b.tld");
-        s.register_federation_key("a.tld", "a-key");
+        // a.tld holds a secret seed; b.tld registers a.tld's public key.
+        let a_seed = gm_fed::ed25519::seed_from_material("a.tld:ed25519:1");
+        let a_public = gm_fed::ed25519::public_key_b64(&a_seed).unwrap();
+        s.register_federation_key("a.tld", &a_public);
 
         let uri = "/_matrix/federation/v1/send/t1";
         let body = r#"{"pdus":[]}"#;
@@ -1159,7 +1187,7 @@ mod tests {
             origin: "a.tld".to_owned(),
             destination: Some("b.tld".to_owned()),
             key_id: "ed25519:1".to_owned(),
-            signature: gm_fed::auth::sign(&bytes, "a-key"),
+            signature: gm_fed::auth::sign(&bytes, &a_seed),
         }
         .to_header();
 
@@ -1167,11 +1195,12 @@ mod tests {
         assert!(s.verify_federation_request("PUT", uri, Some(body), Some(&good)));
         // No header, an unknown origin, a wrong destination, or a bad signature fail.
         assert!(!s.verify_federation_request("PUT", uri, Some(body), None));
+        let wrong_seed = gm_fed::ed25519::seed_from_material("a.tld:wrong");
         let wrong_sig = gm_fed::auth::XMatrixAuth {
             origin: "a.tld".to_owned(),
             destination: Some("b.tld".to_owned()),
             key_id: "ed25519:1".to_owned(),
-            signature: gm_fed::auth::sign(&bytes, "wrong-key"),
+            signature: gm_fed::auth::sign(&bytes, &wrong_seed),
         }
         .to_header();
         assert!(!s.verify_federation_request("PUT", uri, Some(body), Some(&wrong_sig)));
@@ -1179,7 +1208,7 @@ mod tests {
             origin: "evil.tld".to_owned(),
             destination: Some("b.tld".to_owned()),
             key_id: "ed25519:1".to_owned(),
-            signature: gm_fed::auth::sign(&bytes, "a-key"),
+            signature: gm_fed::auth::sign(&bytes, &a_seed),
         }
         .to_header();
         assert!(!s.verify_federation_request("PUT", uri, Some(body), Some(&unknown_origin)));
