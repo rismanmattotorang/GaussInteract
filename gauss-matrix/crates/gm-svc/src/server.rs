@@ -176,15 +176,28 @@ impl<S: Store + Clone> FederationReceiver for GaussServer<S> {
         let mut results = BTreeMap::new();
         if let Ok(transaction) = Transaction::from_json(txn) {
             let mut rooms = RoomService::new(self.store.clone());
+            // Process PDUs in order: each accepted event updates room state, so a
+            // later event in the same transaction authorizes against it.
             for pdu in &transaction.pdus {
-                // Persist the inbound event. Full auth-chain/state-res validation
-                // of federated PDUs is a later slice; the per-event ack is the
-                // empty object on acceptance.
-                rooms.append(pdu);
-                results.insert(
-                    pdu.event_id.as_str().to_owned(),
-                    Json::Object(BTreeMap::new()),
-                );
+                let state = rooms.current_state_pdus(&pdu.room_id);
+                let outcome = match gm_stateres::auth::check_auth(pdu, &state) {
+                    Ok(()) => {
+                        rooms.append(pdu);
+                        Json::Object(BTreeMap::new())
+                    }
+                    Err(_) => {
+                        // The PDU is not authorized by room state; reject it (the
+                        // per-event ack carries the error, the spec's shape for a
+                        // rejected event).
+                        let mut err = BTreeMap::new();
+                        err.insert(
+                            "error".to_owned(),
+                            Json::String("event not authorized by room state".to_owned()),
+                        );
+                        Json::Object(err)
+                    }
+                };
+                results.insert(pdu.event_id.as_str().to_owned(), outcome);
             }
         }
         let mut obj = BTreeMap::new();
@@ -608,31 +621,81 @@ mod tests {
     }
 
     #[test]
-    fn receive_transaction_ingests_federated_pdus() {
+    fn receive_transaction_authorizes_and_ingests_a_federated_room() {
         let s = server();
-        let room = RoomId::parse("!r:other.tld").unwrap();
+        let room = RoomId::parse("!shared:other.tld").unwrap();
+        let bob = "@bob:other.tld";
         let mut txn = gm_fed::Transaction::new("other.tld", 1700);
+        // A self-consistent federated history: create, the creator's join, then a
+        // message — each authorizes against the state the prior events establish.
+        let fed = |id: &str, kind: &str, state_key: Option<&str>, content: &str, depth: u64| Pdu {
+            event_id: EventId::parse(id).unwrap(),
+            room_id: room.clone(),
+            sender: UserId::parse(bob).unwrap(),
+            kind: kind.to_owned(),
+            state_key: state_key.map(str::to_owned),
+            origin_server_ts: depth,
+            depth,
+            prev_events: Vec::new(),
+            auth_events: Vec::new(),
+            content_json: content.to_owned(),
+        };
+        txn.pdus.push(fed(
+            "$c",
+            events::ROOM_CREATE,
+            Some(""),
+            r#"{"creator":"@bob:other.tld"}"#,
+            1,
+        ));
+        txn.pdus.push(fed(
+            "$m",
+            events::ROOM_MEMBER,
+            Some(bob),
+            r#"{"membership":"join"}"#,
+            2,
+        ));
+        txn.pdus.push(fed(
+            "$msg",
+            events::ROOM_MESSAGE,
+            None,
+            r#"{"body":"from afar"}"#,
+            3,
+        ));
+
+        let result = s.receive_transaction(&txn.to_json());
+        // Every event was authorized (its ack is the empty object, no "error").
+        for id in ["$c", "$m", "$msg"] {
+            let ack = result.get("pdus").and_then(|p| p.get(id)).unwrap();
+            assert!(ack.get("error").is_none(), "{id} should be accepted");
+        }
+        // All three landed in the room timeline.
+        assert_eq!(s.timeline(&room).len(), 3);
+    }
+
+    #[test]
+    fn receive_transaction_rejects_an_unauthorized_federated_pdu() {
+        let s = server();
+        let room = RoomId::parse("!nope:other.tld").unwrap();
+        let mut txn = gm_fed::Transaction::new("other.tld", 1700);
+        // A message into a room with no create event: unauthorized.
         txn.pdus.push(Pdu {
-            event_id: EventId::parse("$fed1").unwrap(),
+            event_id: EventId::parse("$orphan").unwrap(),
             room_id: room.clone(),
             sender: UserId::parse("@bob:other.tld").unwrap(),
             kind: events::ROOM_MESSAGE.to_owned(),
             state_key: None,
-            origin_server_ts: 1700,
+            origin_server_ts: 1,
             depth: 1,
             prev_events: Vec::new(),
             auth_events: Vec::new(),
-            content_json: r#"{"body":"from afar"}"#.to_owned(),
+            content_json: "{}".to_owned(),
         });
 
         let result = s.receive_transaction(&txn.to_json());
-        // The per-PDU ack carries an (empty) object keyed by event id.
-        assert!(result.get("pdus").and_then(|p| p.get("$fed1")).is_some());
-        // The federated event is now in the room timeline.
-        let timeline = s.timeline(&room);
-        assert_eq!(timeline.len(), 1);
-        assert_eq!(timeline[0].event_id.as_str(), "$fed1");
-        assert_eq!(timeline[0].sender.as_str(), "@bob:other.tld");
+        // The ack carries an error, and nothing was ingested.
+        let ack = result.get("pdus").and_then(|p| p.get("$orphan")).unwrap();
+        assert!(ack.get("error").is_some());
+        assert!(s.timeline(&room).is_empty());
     }
 
     #[test]
