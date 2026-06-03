@@ -14,16 +14,19 @@
 //!   create);
 //! - every other event requires the room to have a create event;
 //! - `m.room.member` transitions follow the join-rules / invite state machine
-//!   (see [`check_auth`]): self-join into a `public` room or to accept an
-//!   invite; invite/kick/ban by a sufficiently-powered member; leaving oneself;
+//!   (see [`check_auth`]): self-join into a `public` room, to accept an invite,
+//!   or into a `restricted`/`knock_restricted` room when a powered member has
+//!   authorised it (MSC3083); knocking when the room permits it; invite/kick/ban
+//!   by a sufficiently-powered member; leaving oneself;
+//! - a `m.room.redaction` requires the room's `redact` power level;
 //! - any other sender must be **joined**, with sufficient **power level** for
 //!   the event — the `state_default` for state events, the `events_default` for
 //!   messages — read from `m.room.power_levels` (before which the room creator
 //!   has power 100 and everyone else 0).
 //!
-//! The remaining rules (restricted joins, third-party invites, redaction power,
-//! per-event-type power overrides) layer on top of this and are the next
-//! increment.
+//! The remaining rules (third-party invites, per-event-type power overrides,
+//! redacting one's own event below the redact level) layer on top of this and
+//! are the next increment.
 
 use gm_api::{events, Json, Pdu};
 
@@ -55,6 +58,9 @@ const DEFAULT_EVENTS_POWER: i64 = 0;
 const DEFAULT_INVITE_POWER: i64 = 0;
 const DEFAULT_KICK_POWER: i64 = 50;
 const DEFAULT_BAN_POWER: i64 = 50;
+/// Default power to redact another user's event when `m.room.power_levels`
+/// omits `redact`.
+const DEFAULT_REDACT_POWER: i64 = 50;
 /// The power a room creator holds before `m.room.power_levels` is set.
 const CREATOR_POWER: i64 = 100;
 
@@ -88,7 +94,11 @@ pub fn check_auth(event: &Pdu, state: &[Pdu]) -> Result<(), AuthError> {
         return Err(AuthError::SenderNotJoined);
     }
 
-    let required = if event.is_state() {
+    // A redaction needs the room's redact power (it strikes another user's
+    // event); other state/message events use the state/events default.
+    let required = if event.kind == events::ROOM_REDACTION {
+        view.redact_level()
+    } else if event.is_state() {
         view.state_default()
     } else {
         view.events_default()
@@ -121,14 +131,30 @@ fn check_member_auth(event: &Pdu, view: &AuthView<'_>) -> Result<(), AuthError> 
             if target != sender {
                 return Err(AuthError::MembershipForbidden);
             }
+            // A banned user cannot join (they must be unbanned first).
+            if target_current == Some("ban") {
+                return Err(AuthError::MembershipForbidden);
+            }
             // The room creator's initial join (part of room creation) is allowed.
             if view.creator().as_deref() == Some(sender) && target_current.is_none() {
                 return Ok(());
             }
-            // Otherwise: a public room, or accepting a pending invite.
+            // Accepting a pending invite is allowed under any join rule.
+            if target_current == Some("invite") {
+                return Ok(());
+            }
             match view.join_rule() {
                 "public" => Ok(()),
-                _ if target_current == Some("invite") => Ok(()),
+                // Restricted (and knock_restricted) rooms: a join is allowed when
+                // a powered member of the room has authorised it, named in
+                // `join_authorised_via_users_server` (MSC3083).
+                "restricted" | "knock_restricted" => {
+                    if restricted_join_authorised(event, view) {
+                        Ok(())
+                    } else {
+                        Err(AuthError::MembershipForbidden)
+                    }
+                }
                 _ => Err(AuthError::MembershipForbidden),
             }
         }
@@ -173,7 +199,12 @@ fn check_member_auth(event: &Pdu, view: &AuthView<'_>) -> Result<(), AuthError> 
             Ok(())
         }
         "knock" => {
-            if target == sender && view.join_rule() == "knock" {
+            // One may knock on oneself when the room permits knocking, and not
+            // if already joined or banned.
+            if target == sender
+                && matches!(view.join_rule(), "knock" | "knock_restricted")
+                && !matches!(target_current, Some("join") | Some("ban"))
+            {
                 Ok(())
             } else {
                 Err(AuthError::MembershipForbidden)
@@ -181,6 +212,22 @@ fn check_member_auth(event: &Pdu, view: &AuthView<'_>) -> Result<(), AuthError> 
         }
         _ => Err(AuthError::MembershipForbidden),
     }
+}
+
+/// Whether a join into a `restricted` room is authorised: the member event names
+/// a `join_authorised_via_users_server` user who is currently joined and holds
+/// at least the invite power level (MSC3083). The authorising server vouches by
+/// signing the event; here we check the cited user can in fact admit members.
+fn restricted_join_authorised(event: &Pdu, view: &AuthView<'_>) -> bool {
+    let Some(authoriser) = Json::parse(&event.content_json).ok().and_then(|c| {
+        c.get("join_authorised_via_users_server")
+            .and_then(Json::as_str)
+            .map(str::to_owned)
+    }) else {
+        return false;
+    };
+    view.membership(&authoriser) == Some("join")
+        && view.power_level(&authoriser) >= view.invite_level()
 }
 
 /// A read-only view of the room's current state for the auth checks.
@@ -258,6 +305,9 @@ impl<'a> AuthView<'a> {
     }
     fn ban_level(&self) -> i64 {
         self.level("ban", DEFAULT_BAN_POWER)
+    }
+    fn redact_level(&self) -> i64 {
+        self.level("redact", DEFAULT_REDACT_POWER)
     }
 
     /// The room creator from the create event's content, if present.
@@ -727,6 +777,112 @@ mod tests {
         assert_eq!(
             check_auth_with_chain(&orphan_member, &by_id),
             Err(AuthError::NoCreateEvent)
+        );
+    }
+
+    fn restricted_room_state() -> Vec<Pdu> {
+        let mut state = ops_room_state();
+        state.push(pdu(
+            events::ROOM_JOIN_RULES,
+            "@alice:gaussian.tech",
+            Some(""),
+            r#"{"join_rule":"restricted"}"#,
+        ));
+        state
+    }
+
+    #[test]
+    fn restricted_join_needs_authorisation_by_a_powered_member() {
+        // Without `join_authorised_via_users_server`, a restricted join fails.
+        assert_eq!(
+            check_auth(&bob_join(), &restricted_room_state()),
+            Err(AuthError::MembershipForbidden)
+        );
+
+        // Authorised by alice (joined, power 100 ≥ invite level): allowed.
+        let authorised = pdu(
+            events::ROOM_MEMBER,
+            "@bob:gaussian.tech",
+            Some("@bob:gaussian.tech"),
+            r#"{"membership":"join","join_authorised_via_users_server":"@alice:gaussian.tech"}"#,
+        );
+        assert_eq!(check_auth(&authorised, &restricted_room_state()), Ok(()));
+
+        // Authorised by a non-member: not allowed.
+        let bogus = pdu(
+            events::ROOM_MEMBER,
+            "@bob:gaussian.tech",
+            Some("@bob:gaussian.tech"),
+            r#"{"membership":"join","join_authorised_via_users_server":"@ghost:gaussian.tech"}"#,
+        );
+        assert_eq!(
+            check_auth(&bogus, &restricted_room_state()),
+            Err(AuthError::MembershipForbidden)
+        );
+    }
+
+    #[test]
+    fn knock_is_allowed_only_when_the_room_permits_knocking() {
+        let knock = pdu(
+            events::ROOM_MEMBER,
+            "@bob:gaussian.tech",
+            Some("@bob:gaussian.tech"),
+            r#"{"membership":"knock"}"#,
+        );
+        // The default (invite) room does not permit knocking.
+        assert_eq!(
+            check_auth(&knock, &ops_room_state()),
+            Err(AuthError::MembershipForbidden)
+        );
+        // A knock room does.
+        let mut state = ops_room_state();
+        state.push(pdu(
+            events::ROOM_JOIN_RULES,
+            "@alice:gaussian.tech",
+            Some(""),
+            r#"{"join_rule":"knock"}"#,
+        ));
+        assert_eq!(check_auth(&knock, &state), Ok(()));
+    }
+
+    #[test]
+    fn redaction_requires_the_redact_power_level() {
+        // A joined member with power below `redact` (50) may message but not redact.
+        let mut state = ops_room_state();
+        state.push(pdu(
+            events::ROOM_MEMBER,
+            "@carol:gaussian.tech",
+            Some("@carol:gaussian.tech"),
+            r#"{"membership":"join"}"#,
+        ));
+        let redaction = pdu(
+            events::ROOM_REDACTION,
+            "@carol:gaussian.tech",
+            None,
+            r#"{"redacts":"$x"}"#,
+        );
+        assert_eq!(
+            check_auth(&redaction, &state),
+            Err(AuthError::InsufficientPower)
+        );
+        // Alice (power 100) may redact.
+        let by_alice = pdu(
+            events::ROOM_REDACTION,
+            "@alice:gaussian.tech",
+            None,
+            r#"{"redacts":"$x"}"#,
+        );
+        assert_eq!(check_auth(&by_alice, &state), Ok(()));
+        // A non-member cannot redact at all.
+        let by_stranger = pdu(
+            events::ROOM_REDACTION,
+            "@mallory:gaussian.tech",
+            None,
+            r#"{"redacts":"$x"}"#,
+        );
+        assert_eq!(
+            check_auth(&by_stranger, &state),
+            Err(AuthError::SenderNotJoined)
         );
     }
 }

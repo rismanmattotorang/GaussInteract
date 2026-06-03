@@ -25,3 +25,5 @@ pub const ROOM_MESSAGE: &str = "m.room.message";
 pub const ROOM_ENCRYPTION: &str = "m.room.encryption";
 /// `m.room.encrypted` — an encrypted event payload.
 pub const ROOM_ENCRYPTED: &str = "m.room.encrypted";
+/// `m.room.redaction` — redacts (strikes) another event.
+pub const ROOM_REDACTION: &str = "m.room.redaction";
