@@ -415,23 +415,38 @@ impl<S: Store + Clone> FederationReceiver for GaussServer<S> {
         let mut results = BTreeMap::new();
         if let Ok(transaction) = Transaction::from_json(txn) {
             let mut rooms = RoomService::new(self.store.clone());
-            // Process PDUs in order: each accepted event updates room state, so a
-            // later event in the same transaction authorizes against it.
+            // `by_id` accumulates events available to authorize later PDUs: the
+            // events already in each room's timeline plus those accepted earlier
+            // in this transaction. An event that declares `auth_events` is
+            // validated against its own (fully present) auth chain; one that does
+            // not is authorized against the room's current state.
+            let mut by_id: std::collections::HashMap<EventId, Pdu> = transaction
+                .pdus
+                .iter()
+                .flat_map(|p| rooms.timeline(&p.room_id))
+                .map(|p| (p.event_id.clone(), p))
+                .collect();
+
             for pdu in &transaction.pdus {
-                let state = rooms.current_state_pdus(&pdu.room_id);
-                let outcome = match gm_stateres::auth::check_auth(pdu, &state) {
+                let authorized = if pdu.auth_events.is_empty() {
+                    gm_stateres::auth::check_auth(pdu, &rooms.current_state_pdus(&pdu.room_id))
+                } else {
+                    gm_stateres::auth::check_auth_with_chain(pdu, &by_id)
+                };
+                let outcome = match authorized {
                     Ok(()) => {
                         rooms.append(pdu);
+                        by_id.insert(pdu.event_id.clone(), pdu.clone());
                         Json::Object(BTreeMap::new())
                     }
                     Err(_) => {
-                        // The PDU is not authorized by room state; reject it (the
-                        // per-event ack carries the error, the spec's shape for a
-                        // rejected event).
+                        // The PDU is not authorized (by room state or its auth
+                        // chain); reject it. The per-event ack carries the error,
+                        // the spec's shape for a rejected event.
                         let mut err = BTreeMap::new();
                         err.insert(
                             "error".to_owned(),
-                            Json::String("event not authorized by room state".to_owned()),
+                            Json::String("event not authorized".to_owned()),
                         );
                         Json::Object(err)
                     }
@@ -1423,6 +1438,67 @@ mod tests {
             assert!(ack.get("error").is_none(), "{id} should be accepted");
         }
         // All three landed in the room timeline.
+        assert_eq!(s.timeline(&room).len(), 3);
+    }
+
+    #[test]
+    fn receive_transaction_validates_the_auth_chain_when_events_cite_it() {
+        let s = server();
+        let room = RoomId::parse("!chain:other.tld").unwrap();
+        let bob = "@bob:other.tld";
+        let fed = |id: &str, kind: &str, sk: Option<&str>, content: &str, auth: &[&str]| Pdu {
+            event_id: EventId::parse(id).unwrap(),
+            room_id: room.clone(),
+            sender: UserId::parse(bob).unwrap(),
+            kind: kind.to_owned(),
+            state_key: sk.map(str::to_owned),
+            origin_server_ts: 1,
+            depth: 1,
+            prev_events: Vec::new(),
+            auth_events: auth.iter().map(|a| EventId::parse(*a).unwrap()).collect(),
+            content_json: content.to_owned(),
+        };
+
+        // A well-formed chain: create ← creator's join ← message.
+        let mut txn = gm_fed::Transaction::new("other.tld", 1700);
+        txn.pdus.push(fed(
+            "$c",
+            events::ROOM_CREATE,
+            Some(""),
+            r#"{"creator":"@bob:other.tld"}"#,
+            &[],
+        ));
+        txn.pdus.push(fed(
+            "$m",
+            events::ROOM_MEMBER,
+            Some(bob),
+            r#"{"membership":"join"}"#,
+            &["$c"],
+        ));
+        txn.pdus.push(fed(
+            "$ok",
+            events::ROOM_MESSAGE,
+            None,
+            r#"{"body":"chained"}"#,
+            &["$c", "$m"],
+        ));
+        // And one message citing an auth event that is not present anywhere.
+        txn.pdus.push(fed(
+            "$bad",
+            events::ROOM_MESSAGE,
+            None,
+            r#"{"body":"dangling"}"#,
+            &["$c", "$m", "$ghost"],
+        ));
+
+        let result = s.receive_transaction(&txn.to_json());
+        for id in ["$c", "$m", "$ok"] {
+            let ack = result.get("pdus").and_then(|p| p.get(id)).unwrap();
+            assert!(ack.get("error").is_none(), "{id} should be accepted");
+        }
+        // The event with the incomplete chain is rejected and not persisted.
+        let bad = result.get("pdus").and_then(|p| p.get("$bad")).unwrap();
+        assert!(bad.get("error").is_some());
         assert_eq!(s.timeline(&room).len(), 3);
     }
 
