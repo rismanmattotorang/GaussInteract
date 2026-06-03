@@ -35,6 +35,8 @@
 //!   membership changes (authorized by the join-rules / power state machine);
 //! - `PUT /_matrix/client/v3/rooms/{roomId}/typing/{userId}` → set the caller's
 //!   typing state (surfaced as the `m.typing` ephemeral EDU on sync);
+//! - `POST /_matrix/client/v3/rooms/{roomId}/receipt/{receiptType}/{eventId}` →
+//!   record the caller's read receipt (the `m.receipt` ephemeral EDU on sync);
 //! - `GET /_matrix/client/v3/sync[?since=…]` → joined rooms with state and
 //!   timeline (full), or only the events since the `?since=` token plus rooms
 //!   left in the window (incremental);
@@ -58,7 +60,7 @@
 use crate::auth::access_token;
 use crate::router::{RouteMatch, RouteResolution, Router};
 use crate::{Auth, Method, SUPPORTED_SPEC_VERSIONS};
-use gm_api::{Homeserver, Json, LoginGrant, MatrixError, NoServer, Pdu, SyncView};
+use gm_api::{Homeserver, JoinedRoom, Json, LoginGrant, MatrixError, NoServer, Pdu, SyncView};
 use gm_util::{RoomId, UserId};
 use std::collections::BTreeMap;
 
@@ -276,6 +278,9 @@ impl<H: Homeserver> Ingress<H> {
             (Method::Put, "/_matrix/client/v3/rooms/{roomId}/typing/{userId}") => {
                 self.serve_typing(m, user, req)
             }
+            (Method::Post, "/_matrix/client/v3/rooms/{roomId}/receipt/{receiptType}/{eventId}") => {
+                self.serve_receipt(m, user)
+            }
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/messages") => self.serve_messages(m),
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/event/{eventId}") => {
                 self.serve_event(m)
@@ -408,6 +413,45 @@ impl<H: Homeserver> Ingress<H> {
             Response::error(
                 403,
                 &MatrixError::forbidden("not permitted to set typing in this room"),
+            )
+        }
+    }
+
+    /// `POST /_matrix/client/v3/rooms/{roomId}/receipt/{receiptType}/{eventId}`:
+    /// record the caller's read receipt at `eventId`. Only `m.read` receipts are
+    /// stored (others are accepted as a no-op `{}`, the spec's lenient shape). A
+    /// malformed room id is `400`; a caller not in the room is `403`.
+    fn serve_receipt(&self, m: &RouteMatch, user: Option<&UserId>) -> Response {
+        let Some(caller) = user else {
+            return Response::error(
+                401,
+                &MatrixError::unknown_token("unrecognized access token"),
+            );
+        };
+        let (Some(room_id), Some(receipt_type), Some(event_id)) = (
+            m.param("roomId"),
+            m.param("receiptType"),
+            m.param("eventId"),
+        ) else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let Ok(room) = RoomId::parse(room_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        // Only m.read participates in the read-receipt model; other types are
+        // accepted without being stored.
+        if receipt_type != "m.read" {
+            return Response::json_ok("{}".to_owned());
+        }
+        if self.server.set_read_receipt(caller, &room, event_id) {
+            Response::json_ok("{}".to_owned())
+        } else {
+            Response::error(
+                403,
+                &MatrixError::forbidden("not permitted to post a receipt in this room"),
             )
         }
     }
@@ -816,15 +860,17 @@ fn room_id_body(room_id: &str) -> String {
 }
 
 /// The `ephemeral` block of a joined room: an `{"events":[…]}` carrying the
-/// `m.typing` EDU when anyone is typing (omitted-as-empty otherwise).
-fn ephemeral_obj(typing: &[gm_util::UserId]) -> BTreeMap<String, Json> {
+/// `m.typing` EDU (when anyone is typing) and the `m.receipt` EDU (when any read
+/// receipts exist); an empty `events` array when neither applies.
+fn ephemeral_obj(jr: &JoinedRoom) -> BTreeMap<String, Json> {
     let mut events = Vec::new();
-    if !typing.is_empty() {
+
+    if !jr.typing.is_empty() {
         let mut content = BTreeMap::new();
         content.insert(
             "user_ids".to_owned(),
             Json::Array(
-                typing
+                jr.typing
                     .iter()
                     .map(|u| Json::String(u.as_str().to_owned()))
                     .collect(),
@@ -835,6 +881,31 @@ fn ephemeral_obj(typing: &[gm_util::UserId]) -> BTreeMap<String, Json> {
         edu.insert("content".to_owned(), Json::Object(content));
         events.push(Json::Object(edu));
     }
+
+    if !jr.receipts.is_empty() {
+        // m.receipt content groups by event id: { event_id: { "m.read": {
+        // user_id: { "ts": <ts> } } } }.
+        let mut by_event: BTreeMap<String, BTreeMap<String, Json>> = BTreeMap::new();
+        for r in &jr.receipts {
+            let mut ts = BTreeMap::new();
+            ts.insert("ts".to_owned(), Json::Number(r.ts as f64));
+            by_event
+                .entry(r.event_id.clone())
+                .or_default()
+                .insert(r.user.as_str().to_owned(), Json::Object(ts));
+        }
+        let mut content = BTreeMap::new();
+        for (event_id, users) in by_event {
+            let mut read = BTreeMap::new();
+            read.insert("m.read".to_owned(), Json::Object(users));
+            content.insert(event_id, Json::Object(read));
+        }
+        let mut edu = BTreeMap::new();
+        edu.insert("type".to_owned(), Json::String("m.receipt".to_owned()));
+        edu.insert("content".to_owned(), Json::Object(content));
+        events.push(Json::Object(edu));
+    }
+
     let mut o = BTreeMap::new();
     o.insert("events".to_owned(), Json::Array(events));
     o
@@ -861,10 +932,7 @@ fn sync_body(view: &SyncView) -> String {
         let mut room = BTreeMap::new();
         room.insert("state".to_owned(), Json::Object(events_obj(&jr.state)));
         room.insert("timeline".to_owned(), Json::Object(timeline));
-        room.insert(
-            "ephemeral".to_owned(),
-            Json::Object(ephemeral_obj(&jr.typing)),
-        );
+        room.insert("ephemeral".to_owned(), Json::Object(ephemeral_obj(jr)));
         join.insert(jr.room.as_str().to_owned(), Json::Object(room));
     }
 
@@ -954,8 +1022,8 @@ mod tests {
     use super::*;
     use gm_api::{
         FederationAuth, FederationReceiver, JoinedRoom, Login, MembershipChanger, MessageSender,
-        RoomCreator, RoomReader, RoomTimeline, ServerKeys, SyncProvider, TokenAuthority,
-        TypingNotifier,
+        ReceiptSetter, RoomCreator, RoomReader, RoomTimeline, ServerKeys, SyncProvider,
+        TokenAuthority, TypingNotifier,
     };
     use std::collections::BTreeMap;
 
@@ -1102,6 +1170,12 @@ mod tests {
             user.as_str() == self.user
         }
     }
+    impl ReceiptSetter for TestServer {
+        fn set_read_receipt(&self, user: &UserId, _room: &RoomId, _event_id: &str) -> bool {
+            // The double accepts a receipt for its own configured user.
+            user.as_str() == self.user
+        }
+    }
     impl SyncProvider for TestServer {
         fn sync(&self, _user: &UserId, _since: Option<&str>) -> gm_api::SyncView {
             // One joined room carrying the double's timeline (no state).
@@ -1113,6 +1187,7 @@ mod tests {
                     state: Vec::new(),
                     timeline: self.timeline.clone(),
                     typing: Vec::new(),
+                    receipts: Vec::new(),
                 }]
             };
             gm_api::SyncView {
@@ -1855,6 +1930,39 @@ mod tests {
     #[test]
     fn typing_requires_authentication() {
         let resp = authed().dispatch(Method::Put, TYPING_TARGET);
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
+    }
+
+    const RECEIPT_TARGET: &str = "/_matrix/client/v3/rooms/!room:gaussian.tech/receipt/m.read/$e1";
+
+    #[test]
+    fn read_receipt_is_accepted() {
+        let req = Request::new(Method::Post, RECEIPT_TARGET)
+            .with_authorization("Bearer tok123")
+            .with_body("{}");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, "{}");
+    }
+
+    #[test]
+    fn non_read_receipt_type_is_a_noop_ok() {
+        // A receipt type other than m.read is accepted without being stored.
+        let req = Request::new(
+            Method::Post,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/receipt/m.read.private/$e1",
+        )
+        .with_authorization("Bearer tok123")
+        .with_body("{}");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, "{}");
+    }
+
+    #[test]
+    fn read_receipt_requires_authentication() {
+        let resp = authed().dispatch(Method::Post, RECEIPT_TARGET);
         assert_eq!(resp.status, 401);
         assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
     }

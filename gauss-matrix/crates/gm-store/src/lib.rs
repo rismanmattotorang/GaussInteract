@@ -63,6 +63,9 @@ pub mod cf {
     /// epoch). An entry whose expiry has passed is treated as not typing (§II,
     /// the `m.typing` ephemeral EDU).
     pub const TYPING: &str = "typing";
+    /// Read receipts: `{room}\u{1f}{user}` → `{event_id}\u{1f}{ts}`, the last
+    /// event a user has read and when (§II, the `m.read` part of `m.receipt`).
+    pub const RECEIPTS: &str = "receipts";
 }
 
 /// A backend-agnostic, column-family keyed store.

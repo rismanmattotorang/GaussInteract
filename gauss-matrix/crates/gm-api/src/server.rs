@@ -37,8 +37,20 @@ pub trait RoomTimeline {
     fn room_timeline(&self, room: &RoomId) -> Vec<Pdu>;
 }
 
+/// One user's read receipt in a room: the last event they have read, with the
+/// timestamp the receipt was recorded (the `m.read` part of `m.receipt`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadReceipt {
+    /// The user the receipt is for.
+    pub user: UserId,
+    /// The event id the user has read up to.
+    pub event_id: String,
+    /// When the receipt was recorded (ms since the Unix epoch).
+    pub ts: u64,
+}
+
 /// One joined room in a [`SyncView`]: its current state, recent timeline, and
-/// ephemeral data (currently the set of users typing).
+/// ephemeral data (the users typing and read receipts).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinedRoom {
     /// The room.
@@ -49,6 +61,8 @@ pub struct JoinedRoom {
     pub timeline: Vec<Pdu>,
     /// The users currently typing in the room (the `m.typing` ephemeral EDU).
     pub typing: Vec<UserId>,
+    /// The room's read receipts (the `m.receipt` ephemeral EDU).
+    pub receipts: Vec<ReadReceipt>,
 }
 
 /// One room a user left within a sync window: the timeline up to and including
@@ -214,6 +228,17 @@ pub trait TypingNotifier {
     fn set_typing(&self, user: &UserId, room: &RoomId, typing: bool, timeout_ms: u64) -> bool;
 }
 
+/// Record a user's read receipt in a room (the `POST …/receipt/m.read/{eventId}`
+/// path).
+///
+/// Marks `user` as having read up to `event_id` in `room`; the receipt surfaces
+/// as the `m.receipt` ephemeral EDU on the room's sync view. Takes `&self`
+/// (interior mutability), like the other writes. Returns whether it was accepted.
+pub trait ReceiptSetter {
+    /// Record `user`'s `m.read` receipt at `event_id` in `room`.
+    fn set_read_receipt(&self, user: &UserId, room: &RoomId, event_id: &str) -> bool;
+}
+
 /// The full capability set the ingress requires of a homeserver. Blanket-
 /// implemented: any type providing all the capability traits is a `Homeserver`.
 pub trait Homeserver:
@@ -225,6 +250,7 @@ pub trait Homeserver:
     + Login
     + MessageSender
     + TypingNotifier
+    + ReceiptSetter
     + SyncProvider
     + FederationReceiver
     + FederationAuth
@@ -241,6 +267,7 @@ impl<T> Homeserver for T where
         + Login
         + MessageSender
         + TypingNotifier
+        + ReceiptSetter
         + SyncProvider
         + FederationReceiver
         + FederationAuth
@@ -373,6 +400,12 @@ impl MessageSender for NoServer {
 
 impl TypingNotifier for NoServer {
     fn set_typing(&self, _user: &UserId, _room: &RoomId, _typing: bool, _timeout_ms: u64) -> bool {
+        false
+    }
+}
+
+impl ReceiptSetter for NoServer {
+    fn set_read_receipt(&self, _user: &UserId, _room: &RoomId, _event_id: &str) -> bool {
         false
     }
 }

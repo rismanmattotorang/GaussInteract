@@ -18,8 +18,8 @@ use crate::{AccountStore, RoomService, SessionStore};
 use gm_api::events;
 use gm_api::{
     FederationAuth, FederationReceiver, JoinedRoom, Json, Login, LoginGrant, MembershipChanger,
-    MessageSender, Pdu, RoomCreator, RoomReader, RoomTimeline, RoomVersion, ServerKeys,
-    SyncProvider, SyncView, TokenAuthority, TypingNotifier,
+    MessageSender, Pdu, ReceiptSetter, RoomCreator, RoomReader, RoomTimeline, RoomVersion,
+    ServerKeys, SyncProvider, SyncView, TokenAuthority, TypingNotifier,
 };
 use gm_fed::{auth as fed_auth, Transaction};
 use gm_store::{cf, Store};
@@ -137,6 +137,29 @@ impl<S: Store + Clone> GaussServer<S> {
         users
     }
 
+    /// The read receipts in `room` (one `m.read` per user), in user-id order.
+    /// Backs the `m.receipt` ephemeral EDU on sync.
+    fn read_receipts(&self, room: &RoomId) -> Vec<gm_api::ReadReceipt> {
+        let prefix = format!("{}{TXN_SEP}", room.as_str());
+        let mut receipts: Vec<gm_api::ReadReceipt> = self
+            .store
+            .scan(cf::RECEIPTS)
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let user = UserId::parse(key.strip_prefix(&prefix)?).ok()?;
+                let value = String::from_utf8(value).ok()?;
+                let (event_id, ts) = value.split_once(TXN_SEP)?;
+                Some(gm_api::ReadReceipt {
+                    user,
+                    event_id: event_id.to_owned(),
+                    ts: ts.parse().ok()?,
+                })
+            })
+            .collect();
+        receipts.sort_by(|a, b| a.user.as_str().cmp(b.user.as_str()));
+        receipts
+    }
+
     /// Mint a fresh room id on this server. Uniqueness (scaffold) comes from the
     /// creator, the live event count and the clock; production uses a CSPRNG.
     fn mint_room_id(&self, creator: &UserId) -> Option<RoomId> {
@@ -208,6 +231,7 @@ impl<S: Store + Clone> SyncProvider for GaussServer<S> {
                         state: rooms.current_state_pdus(&room),
                         timeline: rooms.timeline(&room),
                         typing: self.typing_users(&room),
+                        receipts: self.read_receipts(&room),
                         room,
                     })
                     .collect();
@@ -243,11 +267,13 @@ impl<S: Store + Clone> SyncProvider for GaussServer<S> {
                             timeline.iter().filter(|p| p.is_state()).cloned().collect()
                         };
                         let typing = self.typing_users(&room);
+                        let receipts = self.read_receipts(&room);
                         joined.push(JoinedRoom {
                             room,
                             state,
                             timeline,
                             typing,
+                            receipts,
                         });
                     } else if left_in_delta(&timeline, user) {
                         // The user's own membership became `leave`/`ban` in this
@@ -552,6 +578,21 @@ impl<S: Store + Clone> TypingNotifier for GaussServer<S> {
         } else {
             store.delete(cf::TYPING, &key);
         }
+        true
+    }
+}
+
+impl<S: Store + Clone> ReceiptSetter for GaussServer<S> {
+    fn set_read_receipt(&self, user: &UserId, room: &RoomId, event_id: &str) -> bool {
+        // Only a user joined to the room may post a receipt in it.
+        let rooms = RoomService::new(self.store.clone());
+        if !self.is_joined(&rooms, room, user) {
+            return false;
+        }
+        let key = format!("{}{TXN_SEP}{}", room.as_str(), user.as_str());
+        let value = format!("{event_id}{TXN_SEP}{}", now_ms());
+        let mut store = self.store.clone();
+        store.put(cf::RECEIPTS, &key, value.as_bytes());
         true
     }
 }
@@ -945,6 +986,53 @@ mod tests {
         let view = s.sync(&alice, None);
         let jr = view.joined.iter().find(|j| j.room == room).unwrap();
         assert!(jr.typing.is_empty());
+    }
+
+    #[test]
+    fn read_receipts_are_surfaced_on_sync() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let bob = UserId::parse("@bob:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+        s.change_membership(&alice, &room, &bob, "invite").unwrap();
+        s.change_membership(&bob, &room, &bob, "join").unwrap();
+        let event_id = s
+            .send_message(
+                &alice,
+                &room,
+                events::ROOM_MESSAGE,
+                "t1",
+                r#"{"body":"hi"}"#,
+            )
+            .unwrap();
+
+        // A non-member cannot post a receipt.
+        let carol = UserId::parse("@carol:gaussian.tech").unwrap();
+        assert!(!s.set_read_receipt(&carol, &room, &event_id));
+
+        // bob reads alice's message; the receipt surfaces on sync.
+        assert!(s.set_read_receipt(&bob, &room, &event_id));
+        let view = s.sync(&alice, None);
+        let jr = view.joined.iter().find(|j| j.room == room).unwrap();
+        assert_eq!(jr.receipts.len(), 1);
+        assert_eq!(jr.receipts[0].user, bob);
+        assert_eq!(jr.receipts[0].event_id, event_id);
+
+        // A later receipt from the same user replaces the earlier marker.
+        let event2 = s
+            .send_message(
+                &alice,
+                &room,
+                events::ROOM_MESSAGE,
+                "t2",
+                r#"{"body":"yo"}"#,
+            )
+            .unwrap();
+        assert!(s.set_read_receipt(&bob, &room, &event2));
+        let view = s.sync(&alice, None);
+        let jr = view.joined.iter().find(|j| j.room == room).unwrap();
+        assert_eq!(jr.receipts.len(), 1);
+        assert_eq!(jr.receipts[0].event_id, event2);
     }
 
     #[test]
