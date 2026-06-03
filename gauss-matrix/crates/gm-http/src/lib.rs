@@ -185,6 +185,7 @@ static SURFACE: &[Endpoint] = &[
     Endpoint::ss_public(Method::Get, "/_matrix/key/v2/server"),
     Endpoint::ss(Method::Put, "/_matrix/federation/v1/send/{txnId}"),
     Endpoint::ss(Method::Get, "/_matrix/federation/v1/state/{roomId}"),
+    Endpoint::ss(Method::Get, "/_matrix/federation/v1/backfill/{roomId}"),
     // Application Service
     Endpoint::as_(Method::Put, "/_matrix/app/v1/transactions/{txnId}"),
 ];

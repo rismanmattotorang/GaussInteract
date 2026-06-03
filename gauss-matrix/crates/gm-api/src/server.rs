@@ -112,6 +112,16 @@ pub trait SyncProvider {
     fn sync(&self, user: &UserId, since: Option<&str>) -> SyncView;
 }
 
+/// Serve historical events to a peer (the SS `GET /backfill/{roomId}` path).
+///
+/// Given the `from` event ids a peer already has, walk the room DAG backwards
+/// over `prev_events` and return up to `limit` preceding events (most recent
+/// first), so the peer can fill a gap in its copy of the room history.
+pub trait Backfill {
+    /// Up to `limit` events at or before `from` in `room`, most recent first.
+    fn backfill(&self, room: &RoomId, from: &[String], limit: usize) -> Vec<Pdu>;
+}
+
 /// Receive an inbound federation transaction (the SS `PUT /send/{txnId}` path).
 ///
 /// The argument is the transaction's JSON body and the result is the
@@ -285,6 +295,7 @@ pub trait Homeserver:
     + FederationReceiver
     + FederationAuth
     + ServerKeys
+    + Backfill
 {
 }
 
@@ -303,6 +314,7 @@ impl<T> Homeserver for T where
         + FederationReceiver
         + FederationAuth
         + ServerKeys
+        + Backfill
 {
 }
 
@@ -370,6 +382,12 @@ impl FederationReceiver for NoServer {
             crate::Json::Object(std::collections::BTreeMap::new()),
         );
         crate::Json::Object(obj)
+    }
+}
+
+impl Backfill for NoServer {
+    fn backfill(&self, _room: &RoomId, _from: &[String], _limit: usize) -> Vec<Pdu> {
+        Vec::new()
     }
 }
 

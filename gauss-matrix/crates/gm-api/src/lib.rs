@@ -33,8 +33,8 @@ pub use json::Json;
 pub use pdu::Pdu;
 pub use room_version::RoomVersion;
 pub use server::{
-    FederationAuth, FederationReceiver, Homeserver, JoinedRoom, LeftRoom, Login, LoginGrant,
-    MembershipChanger, MessageSender, NoServer, PresenceStore, PresenceUpdate, ReadReceipt,
-    ReceiptSetter, RoomCreator, RoomReader, RoomTimeline, ServerKeys, SyncProvider, SyncView,
-    TypingNotifier,
+    Backfill, FederationAuth, FederationReceiver, Homeserver, JoinedRoom, LeftRoom, Login,
+    LoginGrant, MembershipChanger, MessageSender, NoServer, PresenceStore, PresenceUpdate,
+    ReadReceipt, ReceiptSetter, RoomCreator, RoomReader, RoomTimeline, ServerKeys, SyncProvider,
+    SyncView, TypingNotifier,
 };

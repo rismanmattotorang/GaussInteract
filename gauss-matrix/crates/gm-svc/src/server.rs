@@ -17,9 +17,9 @@
 use crate::{AccountStore, RoomService, SessionStore};
 use gm_api::events;
 use gm_api::{
-    FederationAuth, FederationReceiver, JoinedRoom, Json, Login, LoginGrant, MembershipChanger,
-    MessageSender, Pdu, PresenceStore, ReceiptSetter, RoomCreator, RoomReader, RoomTimeline,
-    RoomVersion, ServerKeys, SyncProvider, SyncView, TokenAuthority, TypingNotifier,
+    Backfill, FederationAuth, FederationReceiver, JoinedRoom, Json, Login, LoginGrant,
+    MembershipChanger, MessageSender, Pdu, PresenceStore, ReceiptSetter, RoomCreator, RoomReader,
+    RoomTimeline, RoomVersion, ServerKeys, SyncProvider, SyncView, TokenAuthority, TypingNotifier,
 };
 use gm_fed::{auth as fed_auth, Transaction};
 use gm_store::{cf, Store};
@@ -512,6 +512,55 @@ impl<S: Store + Clone> ServerKeys for GaussServer<S> {
         doc.insert("signatures".to_owned(), Json::Object(signatures));
 
         Json::Object(doc)
+    }
+}
+
+impl<S: Store + Clone> Backfill for GaussServer<S> {
+    fn backfill(&self, room: &RoomId, from: &[String], limit: usize) -> Vec<Pdu> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let rooms = RoomService::new(self.store.clone());
+        let timeline = rooms.timeline(room);
+        let by_id: std::collections::HashMap<&str, &Pdu> =
+            timeline.iter().map(|p| (p.event_id.as_str(), p)).collect();
+
+        // Seed the walk with the requested `from` events; if none were given,
+        // start from the deepest (most recent) event so a bare request still
+        // yields recent history.
+        let mut frontier: Vec<String> = from
+            .iter()
+            .filter(|id| by_id.contains_key(id.as_str()))
+            .cloned()
+            .collect();
+        if frontier.is_empty() {
+            if let Some(tip) = timeline.iter().max_by_key(|p| p.depth) {
+                frontier.push(tip.event_id.as_str().to_owned());
+            }
+        }
+
+        // Walk backwards over prev_events, collecting distinct events.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut collected: Vec<Pdu> = Vec::new();
+        while let Some(id) = frontier.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(pdu) = by_id.get(id.as_str()) {
+                collected.push((*pdu).clone());
+                for prev in &pdu.prev_events {
+                    let prev = prev.as_str().to_owned();
+                    if !seen.contains(&prev) {
+                        frontier.push(prev);
+                    }
+                }
+            }
+        }
+
+        // Most recent first, capped at `limit`.
+        collected.sort_by(|a, b| b.depth.cmp(&a.depth));
+        collected.truncate(limit);
+        collected
     }
 }
 
@@ -1526,6 +1575,43 @@ mod tests {
         let ack = result.get("pdus").and_then(|p| p.get("$orphan")).unwrap();
         assert!(ack.get("error").is_some());
         assert!(s.timeline(&room).is_empty());
+    }
+
+    #[test]
+    fn backfill_walks_prev_events_backwards_most_recent_first() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+        // A short message history; each send links onto the room's tip.
+        for i in 0..5 {
+            s.send_message(
+                &alice,
+                &room,
+                events::ROOM_MESSAGE,
+                &format!("t{i}"),
+                r#"{"body":"x"}"#,
+            )
+            .unwrap();
+        }
+        let timeline = s.timeline(&room);
+        let tip = timeline.last().unwrap().event_id.as_str().to_owned();
+
+        // Backfill from the tip, limited to 3 events: the three deepest, newest
+        // first.
+        let chunk = s.backfill(&room, std::slice::from_ref(&tip), 3);
+        assert_eq!(chunk.len(), 3);
+        assert_eq!(chunk[0].event_id.as_str(), tip);
+        assert!(chunk[0].depth > chunk[1].depth && chunk[1].depth > chunk[2].depth);
+
+        // With no `from`, backfill starts from the deepest event.
+        let from_tip = s.backfill(&room, &[], 1);
+        assert_eq!(from_tip.len(), 1);
+        assert_eq!(from_tip[0].event_id.as_str(), tip);
+
+        // An unknown room yields nothing.
+        assert!(s
+            .backfill(&RoomId::parse("!none:gaussian.tech").unwrap(), &[], 10)
+            .is_empty());
     }
 
     #[test]

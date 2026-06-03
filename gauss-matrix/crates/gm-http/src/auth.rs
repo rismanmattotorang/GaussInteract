@@ -55,6 +55,21 @@ pub(crate) fn query_param(target: &str, name: &str) -> Option<String> {
     None
 }
 
+/// Every value of query parameter `name` in a request target, in order — for
+/// parameters that may legitimately repeat (e.g. backfill's `v=<eventId>`).
+pub(crate) fn query_params_all(target: &str, name: &str) -> Vec<String> {
+    let Some(query) = target.split('?').nth(1) else {
+        return Vec::new();
+    };
+    let query = query.split('#').next().unwrap_or(query);
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .filter(|(k, v)| *k == name && !v.is_empty())
+        .map(|(_, v)| v.to_owned())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
