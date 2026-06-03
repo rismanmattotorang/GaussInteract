@@ -41,6 +41,10 @@ pub enum AuthError {
     /// The `m.room.member` transition is not permitted (join rules / invite
     /// state machine).
     MembershipForbidden,
+    /// An event in the auth chain was not present (an incomplete chain — the
+    /// missing events must be fetched/backfilled before the event can be
+    /// authorized).
+    MissingAuthEvent,
 }
 
 /// The default power required to send a state event (no `state_default` set).
@@ -296,6 +300,74 @@ impl<'a> AuthView<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Auth-chain validation (spec §III.D / §V).
+// ---------------------------------------------------------------------------
+
+use gm_util::EventId;
+use std::collections::{HashMap, HashSet};
+
+/// The transitive **auth chain** of `roots`: every event reachable by following
+/// `auth_events` links, resolved through `by_id`. The roots themselves are
+/// included. An `auth_events` reference absent from `by_id` is simply not
+/// expanded (its absence is surfaced by [`check_auth_with_chain`]).
+pub fn auth_chain(roots: &[EventId], by_id: &HashMap<EventId, Pdu>) -> HashSet<EventId> {
+    let mut seen = HashSet::new();
+    let mut stack: Vec<EventId> = roots.to_vec();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if let Some(pdu) = by_id.get(&id) {
+            for parent in &pdu.auth_events {
+                if !seen.contains(parent) {
+                    stack.push(parent.clone());
+                }
+            }
+        }
+    }
+    seen
+}
+
+/// Authorize `event` against the state selected by its **own `auth_events`**
+/// (not the room's current state), validating the auth chain as it goes — the
+/// Matrix rule for an event received over federation.
+///
+/// Every id in `event.auth_events`, and every event transitively reachable
+/// through them, must be present in `by_id` (a complete, fetched chain) or this
+/// returns [`AuthError::MissingAuthEvent`]. The event is then checked with
+/// [`check_auth`] against the state its direct auth events form, and a
+/// non-create event whose chain does not reach an `m.room.create` is rejected
+/// with [`AuthError::NoCreateEvent`].
+pub fn check_auth_with_chain(event: &Pdu, by_id: &HashMap<EventId, Pdu>) -> Result<(), AuthError> {
+    // The whole chain behind this event must be present.
+    let chain = auth_chain(&event.auth_events, by_id);
+    for id in &chain {
+        if !by_id.contains_key(id) {
+            return Err(AuthError::MissingAuthEvent);
+        }
+    }
+
+    // The auth state is the set of (state) events this event directly cites.
+    let auth_state: Vec<Pdu> = event
+        .auth_events
+        .iter()
+        .filter_map(|id| by_id.get(id).cloned())
+        .collect();
+
+    // A non-create event's chain must reach a create event.
+    if event.kind != events::ROOM_CREATE
+        && !chain
+            .iter()
+            .filter_map(|id| by_id.get(id))
+            .any(|p| p.kind == events::ROOM_CREATE)
+    {
+        return Err(AuthError::NoCreateEvent);
+    }
+
+    check_auth(event, &auth_state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,5 +614,119 @@ mod tests {
             r#"{"name":"Ops"}"#,
         );
         assert_eq!(check_auth(&name, &state), Ok(()));
+    }
+
+    // Build a PDU with a specific id and auth_events for the chain tests.
+    fn chain_pdu(
+        id: &str,
+        kind: &str,
+        sender: &str,
+        state_key: Option<&str>,
+        content: &str,
+        auth: &[&str],
+    ) -> Pdu {
+        let mut p = pdu(kind, sender, state_key, content);
+        p.event_id = EventId::parse(id).unwrap();
+        p.auth_events = auth.iter().map(|a| EventId::parse(*a).unwrap()).collect();
+        p
+    }
+
+    /// A self-consistent chain: create ← creator's join ← a message.
+    fn federated_chain() -> (HashMap<EventId, Pdu>, Pdu, Pdu) {
+        let create = chain_pdu(
+            "$c",
+            events::ROOM_CREATE,
+            "@carol:a.tld",
+            Some(""),
+            r#"{"creator":"@carol:a.tld"}"#,
+            &[],
+        );
+        let join = chain_pdu(
+            "$m",
+            events::ROOM_MEMBER,
+            "@carol:a.tld",
+            Some("@carol:a.tld"),
+            r#"{"membership":"join"}"#,
+            &["$c"],
+        );
+        let msg = chain_pdu(
+            "$msg",
+            events::ROOM_MESSAGE,
+            "@carol:a.tld",
+            None,
+            r#"{"body":"hi"}"#,
+            &["$c", "$m"],
+        );
+        let mut by_id = HashMap::new();
+        by_id.insert(create.event_id.clone(), create.clone());
+        by_id.insert(join.event_id.clone(), join.clone());
+        (by_id, join, msg)
+    }
+
+    #[test]
+    fn auth_chain_collects_the_transitive_closure() {
+        let (by_id, _join, msg) = federated_chain();
+        let chain = auth_chain(&msg.auth_events, &by_id);
+        // The message cites $c and $m; $m in turn cites $c.
+        assert_eq!(chain.len(), 2);
+        assert!(chain.contains(&EventId::parse("$c").unwrap()));
+        assert!(chain.contains(&EventId::parse("$m").unwrap()));
+    }
+
+    #[test]
+    fn check_auth_with_chain_accepts_a_well_formed_event() {
+        let (by_id, _join, msg) = federated_chain();
+        assert_eq!(check_auth_with_chain(&msg, &by_id), Ok(()));
+    }
+
+    #[test]
+    fn check_auth_with_chain_rejects_a_missing_auth_event() {
+        let (mut by_id, _join, msg) = federated_chain();
+        // Drop the create event: the chain is now incomplete.
+        by_id.remove(&EventId::parse("$c").unwrap());
+        assert_eq!(
+            check_auth_with_chain(&msg, &by_id),
+            Err(AuthError::MissingAuthEvent)
+        );
+    }
+
+    #[test]
+    fn check_auth_with_chain_rejects_an_unauthorized_sender() {
+        let (mut by_id, _join, _msg) = federated_chain();
+        // A message from someone who is not joined, but who cites the same
+        // (carol's) auth events, is not authorized by that state.
+        let mallory = chain_pdu(
+            "$bad",
+            events::ROOM_MESSAGE,
+            "@mallory:b.tld",
+            None,
+            r#"{"body":"intrude"}"#,
+            &["$c", "$m"],
+        );
+        by_id.insert(mallory.event_id.clone(), mallory.clone());
+        assert_eq!(
+            check_auth_with_chain(&mallory, &by_id),
+            Err(AuthError::SenderNotJoined)
+        );
+    }
+
+    #[test]
+    fn check_auth_with_chain_rejects_a_chain_without_a_create() {
+        // A membership event whose auth chain never reaches a create event.
+        let orphan_member = chain_pdu(
+            "$m",
+            events::ROOM_MEMBER,
+            "@carol:a.tld",
+            Some("@carol:a.tld"),
+            r#"{"membership":"join"}"#,
+            &[],
+        );
+        let mut by_id = HashMap::new();
+        by_id.insert(orphan_member.event_id.clone(), orphan_member.clone());
+        // It cites no auth events, so its chain reaches no create.
+        assert_eq!(
+            check_auth_with_chain(&orphan_member, &by_id),
+            Err(AuthError::NoCreateEvent)
+        );
     }
 }
