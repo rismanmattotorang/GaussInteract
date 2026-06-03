@@ -19,6 +19,7 @@
 #![deny(rust_2018_idioms)]
 
 pub mod auth;
+pub mod ed25519;
 
 use gm_api::{Json, Pdu};
 use std::collections::BTreeMap;
