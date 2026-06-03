@@ -27,7 +27,8 @@
 //! - `POST /_matrix/client/v3/rooms/{roomId}/{join,leave,invite,kick,ban}` →
 //!   membership changes (authorized by the join-rules / power state machine);
 //! - `GET /_matrix/client/v3/sync[?since=…]` → joined rooms with state and
-//!   timeline (full), or only the events since the `?since=` token (incremental);
+//!   timeline (full), or only the events since the `?since=` token plus rooms
+//!   left in the window (incremental);
 //! - `PUT /_matrix/federation/v1/send/{txnId}` → ingest an inbound federation
 //!   transaction (PDUs/EDUs), returning the per-PDU acknowledgement;
 //! - `GET /_matrix/federation/v1/state/{roomId}` → the room's current state as
@@ -629,7 +630,7 @@ fn room_id_body(room_id: &str) -> String {
 
 /// The `GET /sync` body:
 /// `{"next_batch":…,"rooms":{"join":{room:{"state":{"events":[…]},
-/// "timeline":{"events":[…],"limited":false}}}}}`.
+/// "timeline":{"events":[…],"limited":false}}},"leave":{room:{"timeline":…}}}}`.
 fn sync_body(view: &SyncView) -> String {
     let events_obj = |events: &[Pdu]| {
         let mut o = BTreeMap::new();
@@ -650,8 +651,18 @@ fn sync_body(view: &SyncView) -> String {
         join.insert(jr.room.as_str().to_owned(), Json::Object(room));
     }
 
+    let mut leave = BTreeMap::new();
+    for lr in &view.left {
+        let mut timeline = events_obj(&lr.timeline);
+        timeline.insert("limited".to_owned(), Json::Bool(false));
+        let mut room = BTreeMap::new();
+        room.insert("timeline".to_owned(), Json::Object(timeline));
+        leave.insert(lr.room.as_str().to_owned(), Json::Object(room));
+    }
+
     let mut rooms = BTreeMap::new();
     rooms.insert("join".to_owned(), Json::Object(join));
+    rooms.insert("leave".to_owned(), Json::Object(leave));
     let mut top = BTreeMap::new();
     top.insert(
         "next_batch".to_owned(),
@@ -864,6 +875,7 @@ mod tests {
             gm_api::SyncView {
                 next_batch: "s1".to_owned(),
                 joined,
+                left: Vec::new(),
             }
         }
     }
