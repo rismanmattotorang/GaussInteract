@@ -75,9 +75,21 @@ pub struct LeftRoom {
     pub timeline: Vec<Pdu>,
 }
 
+/// A user's presence: their status (`online` / `offline` / `unavailable`) and
+/// an optional free-text status message (the `m.presence` ephemeral EDU).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresenceUpdate {
+    /// The user the presence is for.
+    pub user: UserId,
+    /// The presence state: `online`, `offline`, or `unavailable`.
+    pub presence: String,
+    /// The optional free-text status message.
+    pub status_msg: Option<String>,
+}
+
 /// A user's sync view: the rooms they have joined, each with state and timeline,
-/// the rooms they left in this window, plus the pagination token a subsequent
-/// sync resumes from.
+/// the rooms they left in this window, the presence of users they share a room
+/// with, plus the pagination token a subsequent sync resumes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncView {
     /// The token to pass as `?since=` on the next sync.
@@ -86,6 +98,8 @@ pub struct SyncView {
     pub joined: Vec<JoinedRoom>,
     /// The rooms the user left (or was kicked/banned from) within the window.
     pub left: Vec<LeftRoom>,
+    /// The presence of users sharing a room with the syncing user.
+    pub presence: Vec<PresenceUpdate>,
 }
 
 /// Build a user's sync view (the CS `/sync` path).
@@ -239,6 +253,21 @@ pub trait ReceiptSetter {
     fn set_read_receipt(&self, user: &UserId, room: &RoomId, event_id: &str) -> bool;
 }
 
+/// Set and read a user's presence (the `PUT`/`GET …/presence/{userId}/status`
+/// paths).
+///
+/// `set_presence` records `user`'s presence state and optional status message;
+/// `presence_for` reads a user's current presence. Presence surfaces as the
+/// `m.presence` ephemeral EDU on the sync views of users who share a room.
+/// Takes `&self` (interior mutability), like the other writes.
+pub trait PresenceStore {
+    /// Set `user`'s presence state and optional status message.
+    fn set_presence(&self, user: &UserId, presence: &str, status_msg: Option<&str>) -> bool;
+
+    /// The current presence of `user`, if any has been recorded.
+    fn presence_for(&self, user: &UserId) -> Option<PresenceUpdate>;
+}
+
 /// The full capability set the ingress requires of a homeserver. Blanket-
 /// implemented: any type providing all the capability traits is a `Homeserver`.
 pub trait Homeserver:
@@ -251,6 +280,7 @@ pub trait Homeserver:
     + MessageSender
     + TypingNotifier
     + ReceiptSetter
+    + PresenceStore
     + SyncProvider
     + FederationReceiver
     + FederationAuth
@@ -268,6 +298,7 @@ impl<T> Homeserver for T where
         + MessageSender
         + TypingNotifier
         + ReceiptSetter
+        + PresenceStore
         + SyncProvider
         + FederationReceiver
         + FederationAuth
@@ -325,6 +356,7 @@ impl SyncProvider for NoServer {
             next_batch: "s0".to_owned(),
             joined: Vec::new(),
             left: Vec::new(),
+            presence: Vec::new(),
         }
     }
 }
@@ -407,6 +439,16 @@ impl TypingNotifier for NoServer {
 impl ReceiptSetter for NoServer {
     fn set_read_receipt(&self, _user: &UserId, _room: &RoomId, _event_id: &str) -> bool {
         false
+    }
+}
+
+impl PresenceStore for NoServer {
+    fn set_presence(&self, _user: &UserId, _presence: &str, _status_msg: Option<&str>) -> bool {
+        false
+    }
+
+    fn presence_for(&self, _user: &UserId) -> Option<PresenceUpdate> {
+        None
     }
 }
 

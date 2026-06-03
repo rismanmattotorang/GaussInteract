@@ -34,6 +34,7 @@ pub use pdu::Pdu;
 pub use room_version::RoomVersion;
 pub use server::{
     FederationAuth, FederationReceiver, Homeserver, JoinedRoom, LeftRoom, Login, LoginGrant,
-    MembershipChanger, MessageSender, NoServer, ReadReceipt, ReceiptSetter, RoomCreator,
-    RoomReader, RoomTimeline, ServerKeys, SyncProvider, SyncView, TypingNotifier,
+    MembershipChanger, MessageSender, NoServer, PresenceStore, PresenceUpdate, ReadReceipt,
+    ReceiptSetter, RoomCreator, RoomReader, RoomTimeline, ServerKeys, SyncProvider, SyncView,
+    TypingNotifier,
 };

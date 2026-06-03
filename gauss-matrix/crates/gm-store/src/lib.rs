@@ -66,6 +66,9 @@ pub mod cf {
     /// Read receipts: `{room}\u{1f}{user}` → `{event_id}\u{1f}{ts}`, the last
     /// event a user has read and when (§II, the `m.read` part of `m.receipt`).
     pub const RECEIPTS: &str = "receipts";
+    /// User presence: `{user}` → `{presence}\u{1f}{status_msg}`, the user's
+    /// status and optional message (§II, the `m.presence` ephemeral EDU).
+    pub const PRESENCE: &str = "presence";
 }
 
 /// A backend-agnostic, column-family keyed store.
