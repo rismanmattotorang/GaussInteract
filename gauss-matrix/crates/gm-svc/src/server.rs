@@ -174,8 +174,8 @@ impl<S: Store + Clone> SyncProvider for GaussServer<S> {
             Some(pos) => {
                 // Only the events that arrived since the token, grouped per room,
                 // for rooms the user is joined to. State is the state events among
-                // the delta. (Full state on a room's first appearance after a
-                // join is a later refinement.)
+                // the delta — except a room the user first joined in this window,
+                // which carries its full current state (see below).
                 let mut by_room: std::collections::BTreeMap<String, Vec<Pdu>> =
                     std::collections::BTreeMap::new();
                 for pdu in rooms.events_since(pos) {
@@ -191,7 +191,17 @@ impl<S: Store + Clone> SyncProvider for GaussServer<S> {
                         if !self.is_joined(&rooms, &room, user) {
                             return None;
                         }
-                        let state = timeline.iter().filter(|p| p.is_state()).cloned().collect();
+                        // If the user's own join lands within this delta they are
+                        // seeing the room for the first time, so carry its full
+                        // current state (as an initial sync would) rather than only
+                        // the state events in the window. Otherwise the client
+                        // already holds the prior state, so the delta's state events
+                        // suffice.
+                        let state = if joined_in_delta(&timeline, user) {
+                            rooms.current_state_pdus(&room)
+                        } else {
+                            timeline.iter().filter(|p| p.is_state()).cloned().collect()
+                        };
                         Some(JoinedRoom {
                             room,
                             state,
@@ -425,6 +435,25 @@ impl<S: Store + Clone> MessageSender for GaussServer<S> {
     }
 }
 
+/// Whether `user`'s own membership becomes `join` within `delta` — i.e. their
+/// join landed in this sync window, so they are seeing the room for the first
+/// time and the incremental sync should carry its full current state.
+fn joined_in_delta(delta: &[Pdu], user: &UserId) -> bool {
+    delta.iter().any(|pdu| {
+        pdu.kind == events::ROOM_MEMBER
+            && pdu.state_key.as_deref() == Some(user.as_str())
+            && Json::parse(&pdu.content_json)
+                .ok()
+                .and_then(|c| {
+                    c.get("membership")
+                        .and_then(Json::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some("join")
+    })
+}
+
 /// Milliseconds since the Unix epoch (the event's `origin_server_ts`).
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -653,6 +682,55 @@ mod tests {
         assert!(jr.timeline.iter().all(|p| p.kind == events::ROOM_MESSAGE));
         // Catching up to the new token yields an empty delta again.
         assert!(s.sync(&alice, Some(&delta.next_batch)).joined.is_empty());
+    }
+
+    #[test]
+    fn incremental_sync_carries_full_state_when_the_user_first_joins() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let bob = UserId::parse("@bob:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+
+        // Bob takes a token before he is in the room, then alice invites him.
+        let token = s.sync(&bob, None).next_batch;
+        s.change_membership(&alice, &room, &bob, "invite").unwrap();
+        s.change_membership(&bob, &room, &bob, "join").unwrap();
+        s.send_message(&bob, &room, events::ROOM_MESSAGE, "t1", r#"{"body":"hi"}"#)
+            .unwrap();
+
+        // Bob's first incremental sync after joining must carry the room's full
+        // current state (create / power levels / members), not just the invite +
+        // join state events that happen to fall in the window — he has never
+        // seen the prior state.
+        let delta = s.sync(&bob, Some(&token));
+        assert_eq!(delta.joined.len(), 1);
+        let jr = &delta.joined[0];
+        assert_eq!(jr.room, room);
+        assert!(jr.state.iter().any(|p| p.kind == events::ROOM_CREATE));
+        assert!(jr.state.iter().any(|p| p.kind == events::ROOM_POWER_LEVELS));
+        // Full state includes both members (alice's create-time join + bob's).
+        let joins = jr
+            .state
+            .iter()
+            .filter(|p| p.kind == events::ROOM_MEMBER)
+            .count();
+        assert_eq!(joins, 2);
+
+        // A later incremental sync (no new join) carries only the delta's state.
+        let token2 = delta.next_batch;
+        s.send_message(
+            &alice,
+            &room,
+            events::ROOM_MESSAGE,
+            "t2",
+            r#"{"body":"yo"}"#,
+        )
+        .unwrap();
+        let delta2 = s.sync(&bob, Some(&token2));
+        assert_eq!(delta2.joined.len(), 1);
+        // Only the new message arrived; it is not a state event, so no full state.
+        assert!(delta2.joined[0].state.is_empty());
+        assert_eq!(delta2.joined[0].timeline.len(), 1);
     }
 
     #[test]
