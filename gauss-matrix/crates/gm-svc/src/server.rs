@@ -17,9 +17,10 @@
 use crate::{AccountStore, RoomService, SessionStore};
 use gm_api::events;
 use gm_api::{
-    Backfill, FederationAuth, FederationReceiver, JoinedRoom, Json, Login, LoginGrant,
-    MembershipChanger, MessageSender, Pdu, PresenceStore, ReceiptSetter, RoomCreator, RoomReader,
-    RoomTimeline, RoomVersion, ServerKeys, SyncProvider, SyncView, TokenAuthority, TypingNotifier,
+    Backfill, DeviceKeyStore, FederationAuth, FederationReceiver, JoinedRoom, Json, Login,
+    LoginGrant, MembershipChanger, MessageSender, Pdu, PresenceStore, ReceiptSetter, RoomCreator,
+    RoomReader, RoomTimeline, RoomVersion, ServerKeys, SyncProvider, SyncView, TokenAuthority,
+    TypingNotifier,
 };
 use gm_fed::{auth as fed_auth, Transaction};
 use gm_store::{cf, Store};
@@ -578,6 +579,56 @@ impl<S: Store + Clone> Backfill for GaussServer<S> {
         collected.sort_by(|a, b| b.depth.cmp(&a.depth));
         collected.truncate(limit);
         collected
+    }
+}
+
+impl<S: Store + Clone> DeviceKeyStore for GaussServer<S> {
+    fn store_device_keys(&self, user: &UserId, device_id: &str, device_keys_json: &str) {
+        let mut store = self.store.clone();
+        let key = format!("{}{TXN_SEP}{device_id}", user.as_str());
+        store.put(cf::DEVICE_KEYS, &key, device_keys_json.as_bytes());
+    }
+
+    fn add_one_time_keys(
+        &self,
+        user: &UserId,
+        device_id: &str,
+        counts: &[(String, u32)],
+    ) -> Vec<(String, u32)> {
+        let mut store = self.store.clone();
+        let prefix = format!("{}{TXN_SEP}{device_id}{TXN_SEP}", user.as_str());
+        for (alg, n) in counts {
+            let key = format!("{prefix}{alg}");
+            let current: u32 = self
+                .store
+                .get(cf::DEVICE_OTK, &key)
+                .and_then(|v| String::from_utf8(v).ok())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            store.put(cf::DEVICE_OTK, &key, (current + n).to_string().as_bytes());
+        }
+        // Return the totals for every algorithm this device has.
+        self.store
+            .scan(cf::DEVICE_OTK)
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let alg = k.strip_prefix(&prefix)?;
+                let total: u32 = String::from_utf8(v).ok()?.parse().ok()?;
+                Some((alg.to_owned(), total))
+            })
+            .collect()
+    }
+
+    fn device_keys_of(&self, user: &UserId) -> Vec<(String, String)> {
+        let prefix = format!("{}{TXN_SEP}", user.as_str());
+        self.store
+            .scan(cf::DEVICE_KEYS)
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let device = k.strip_prefix(&prefix)?;
+                Some((device.to_owned(), String::from_utf8(v).ok()?))
+            })
+            .collect()
     }
 }
 
@@ -1642,6 +1693,33 @@ mod tests {
         depths.sort_unstable();
         depths.dedup();
         assert_eq!(depths.len(), 16);
+    }
+
+    #[test]
+    fn device_keys_upload_query_and_otk_counts_round_trip() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        s.store_device_keys(
+            &alice,
+            "DEV1",
+            r#"{"device_id":"DEV1","algorithms":["m.olm.v1"]}"#,
+        );
+
+        // The stored keys come back for the user, keyed by device.
+        let devices = s.device_keys_of(&alice);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].0, "DEV1");
+        assert!(devices[0].1.contains("\"device_id\":\"DEV1\""));
+
+        // One-time-key counts accumulate per algorithm.
+        let totals = s.add_one_time_keys(&alice, "DEV1", &[("signed_curve25519".to_owned(), 20)]);
+        assert_eq!(totals, vec![("signed_curve25519".to_owned(), 20)]);
+        let totals = s.add_one_time_keys(&alice, "DEV1", &[("signed_curve25519".to_owned(), 5)]);
+        assert_eq!(totals, vec![("signed_curve25519".to_owned(), 25)]);
+
+        // A different user's devices are not returned.
+        let bob = UserId::parse("@bob:gaussian.tech").unwrap();
+        assert!(s.device_keys_of(&bob).is_empty());
     }
 
     #[test]

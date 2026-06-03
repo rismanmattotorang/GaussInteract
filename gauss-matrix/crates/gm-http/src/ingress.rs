@@ -48,6 +48,10 @@
 //!   `{"pdus":[…],"auth_chain":[…]}`;
 //! - `GET /_matrix/federation/v1/backfill/{roomId}` → historical events at or
 //!   before the `v` events as `{"pdus":[…]}`;
+//! - `POST /_matrix/client/v3/keys/{upload,query}` → upload/query E2EE device
+//!   keys and one-time-key counts;
+//! - `GET /_matrix/federation/v1/user/devices/{userId}` → a user's device list
+//!   for a peer;
 //! - `GET /_matrix/key/v2/server` → this server's published signing keys
 //!   (public, for remote servers to fetch and cache).
 //!
@@ -311,6 +315,8 @@ impl<H: Homeserver> Ingress<H> {
                 self.serve_membership_target(m, user, req, "ban")
             }
             (Method::Post, "/_matrix/client/v3/createRoom") => self.serve_create_room(user, req),
+            (Method::Post, "/_matrix/client/v3/keys/upload") => self.serve_keys_upload(user, req),
+            (Method::Post, "/_matrix/client/v3/keys/query") => self.serve_keys_query(req),
             (Method::Get, "/_matrix/client/v3/sync") => self.serve_sync(user, req),
             (Method::Get, "/_matrix/key/v2/server") => {
                 // Public: publish this server's signing keys for fetch + cache.
@@ -322,6 +328,9 @@ impl<H: Homeserver> Ingress<H> {
             }
             (Method::Get, "/_matrix/federation/v1/backfill/{roomId}") => {
                 self.serve_federation_backfill(m, req)
+            }
+            (Method::Get, "/_matrix/federation/v1/user/devices/{userId}") => {
+                self.serve_user_devices(m)
             }
             _ => Response::error(
                 501,
@@ -724,6 +733,120 @@ impl<H: Homeserver> Ingress<H> {
             "pdus".to_owned(),
             Json::Array(pdus.iter().map(Pdu::to_json).collect()),
         );
+        Response::json_ok(Json::Object(obj).to_string())
+    }
+
+    /// `POST /_matrix/client/v3/keys/upload`: store the caller's device keys and
+    /// add their one-time-key counts, returning `{"one_time_key_counts":{…}}`.
+    /// The device is read from `device_keys.device_id` (else `"default"`).
+    fn serve_keys_upload(&self, user: Option<&UserId>, req: &Request<'_>) -> Response {
+        let Some(user) = user else {
+            return Response::error(
+                401,
+                &MatrixError::unknown_token("unrecognized access token"),
+            );
+        };
+        let Ok(Json::Object(body)) = Json::parse(req.body.unwrap_or("{}")) else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_BAD_JSON", "body must be an object"),
+            );
+        };
+        // The device id comes from the uploaded device_keys, defaulting when an
+        // upload tops up one-time keys only.
+        let device_id = body
+            .get("device_keys")
+            .and_then(|d| d.get("device_id"))
+            .and_then(Json::as_str)
+            .unwrap_or("default")
+            .to_owned();
+        if let Some(device_keys) = body.get("device_keys") {
+            self.server
+                .store_device_keys(user, &device_id, &device_keys.to_string());
+        }
+        // Count uploaded one-time keys per algorithm (the part before ':').
+        let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+        if let Some(Json::Object(otk)) = body.get("one_time_keys") {
+            for key_id in otk.keys() {
+                let alg = key_id.split(':').next().unwrap_or(key_id);
+                *counts.entry(alg.to_owned()).or_insert(0) += 1;
+            }
+        }
+        let counts: Vec<(String, u32)> = counts.into_iter().collect();
+        let totals = self.server.add_one_time_keys(user, &device_id, &counts);
+        let mut obj = BTreeMap::new();
+        obj.insert(
+            "one_time_key_counts".to_owned(),
+            Json::Object(
+                totals
+                    .into_iter()
+                    .map(|(alg, n)| (alg, Json::Number(n as f64)))
+                    .collect(),
+            ),
+        );
+        Response::json_ok(Json::Object(obj).to_string())
+    }
+
+    /// `POST /_matrix/client/v3/keys/query`: return the stored device keys for
+    /// the requested users as `{"device_keys":{user:{device:<keys>}}}`.
+    fn serve_keys_query(&self, req: &Request<'_>) -> Response {
+        let Ok(Json::Object(body)) = Json::parse(req.body.unwrap_or("{}")) else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_BAD_JSON", "body must be an object"),
+            );
+        };
+        let mut device_keys = BTreeMap::new();
+        if let Some(Json::Object(requested)) = body.get("device_keys") {
+            for user_id in requested.keys() {
+                let Ok(user) = UserId::parse(user_id.clone()) else {
+                    continue;
+                };
+                let mut devices = BTreeMap::new();
+                for (device, keys_json) in self.server.device_keys_of(&user) {
+                    if let Ok(keys) = Json::parse(&keys_json) {
+                        devices.insert(device, keys);
+                    }
+                }
+                device_keys.insert(user_id.clone(), Json::Object(devices));
+            }
+        }
+        let mut obj = BTreeMap::new();
+        obj.insert("device_keys".to_owned(), Json::Object(device_keys));
+        Response::json_ok(Json::Object(obj).to_string())
+    }
+
+    /// `GET /_matrix/federation/v1/user/devices/{userId}`: a user's device list
+    /// for a peer, as `{"user_id":…,"stream_id":0,"devices":[{"device_id":…,
+    /// "keys":<device_keys>}]}`.
+    fn serve_user_devices(&self, m: &RouteMatch) -> Response {
+        let Some(user_id) = m.param("userId") else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let Ok(user) = UserId::parse(user_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid user id"));
+        };
+        let devices: Vec<Json> = self
+            .server
+            .device_keys_of(&user)
+            .into_iter()
+            .map(|(device, keys_json)| {
+                let mut d = BTreeMap::new();
+                d.insert("device_id".to_owned(), Json::String(device));
+                d.insert(
+                    "keys".to_owned(),
+                    Json::parse(&keys_json).unwrap_or(Json::Object(BTreeMap::new())),
+                );
+                Json::Object(d)
+            })
+            .collect();
+        let mut obj = BTreeMap::new();
+        obj.insert("user_id".to_owned(), Json::String(user.as_str().to_owned()));
+        obj.insert("stream_id".to_owned(), Json::Number(0.0));
+        obj.insert("devices".to_owned(), Json::Array(devices));
         Response::json_ok(Json::Object(obj).to_string())
     }
 
@@ -1162,9 +1285,9 @@ fn json_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use gm_api::{
-        Backfill, FederationAuth, FederationReceiver, JoinedRoom, Login, MembershipChanger,
-        MessageSender, PresenceStore, ReceiptSetter, RoomCreator, RoomReader, RoomTimeline,
-        ServerKeys, SyncProvider, TokenAuthority, TypingNotifier,
+        Backfill, DeviceKeyStore, FederationAuth, FederationReceiver, JoinedRoom, Login,
+        MembershipChanger, MessageSender, PresenceStore, ReceiptSetter, RoomCreator, RoomReader,
+        RoomTimeline, ServerKeys, SyncProvider, TokenAuthority, TypingNotifier,
     };
     use std::collections::BTreeMap;
 
@@ -1294,6 +1417,22 @@ mod tests {
             pdus.reverse();
             pdus.truncate(limit);
             pdus
+        }
+    }
+    impl DeviceKeyStore for TestServer {
+        fn store_device_keys(&self, _user: &UserId, _device_id: &str, _json: &str) {}
+        fn add_one_time_keys(
+            &self,
+            _user: &UserId,
+            _device_id: &str,
+            counts: &[(String, u32)],
+        ) -> Vec<(String, u32)> {
+            // Echo back what was offered, so the upload response is observable.
+            counts.to_vec()
+        }
+        fn device_keys_of(&self, _user: &UserId) -> Vec<(String, String)> {
+            // One fixed device with minimal keys, so query/devices are observable.
+            vec![("DEV1".to_owned(), r#"{"device_id":"DEV1"}"#.to_owned())]
         }
     }
     impl ServerKeys for TestServer {
@@ -2281,6 +2420,82 @@ mod tests {
         let resp = authed().dispatch(
             Method::Get,
             "/_matrix/federation/v1/backfill/!room:gaussian.tech",
+        );
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("M_UNAUTHORIZED"));
+    }
+
+    #[test]
+    fn keys_upload_returns_one_time_key_counts() {
+        let req = Request::new(Method::Post, "/_matrix/client/v3/keys/upload")
+            .with_authorization("Bearer tok123")
+            .with_body(
+                r#"{"device_keys":{"device_id":"DEV1"},
+                    "one_time_keys":{"signed_curve25519:AAAA":{},"signed_curve25519:BBBB":{}}}"#,
+            );
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        let counts = Json::parse(&resp.body)
+            .unwrap()
+            .get("one_time_key_counts")
+            .and_then(|c| c.get("signed_curve25519"))
+            .and_then(Json::as_u64);
+        // The double echoes the offered counts: two curve25519 keys.
+        assert_eq!(counts, Some(2));
+    }
+
+    #[test]
+    fn keys_upload_requires_authentication() {
+        let resp = authed().dispatch(Method::Post, "/_matrix/client/v3/keys/upload");
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
+    }
+
+    #[test]
+    fn keys_query_returns_stored_device_keys() {
+        let req = Request::new(Method::Post, "/_matrix/client/v3/keys/query")
+            .with_authorization("Bearer tok123")
+            .with_body(r#"{"device_keys":{"@alice:gaussian.tech":[]}}"#);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        let dev = Json::parse(&resp.body)
+            .unwrap()
+            .get("device_keys")
+            .and_then(|d| d.get("@alice:gaussian.tech"))
+            .and_then(|u| u.get("DEV1"))
+            .and_then(|d| d.get("device_id"))
+            .and_then(Json::as_str)
+            .map(str::to_owned);
+        assert_eq!(dev.as_deref(), Some("DEV1"));
+    }
+
+    #[test]
+    fn federation_user_devices_lists_a_users_devices() {
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/federation/v1/user/devices/@alice:gaussian.tech",
+        )
+        .with_authorization("X-Matrix origin=other.tld,key=\"ed25519:1\",sig=\"abc\"");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        let body = Json::parse(&resp.body).unwrap();
+        assert_eq!(
+            body.get("user_id").and_then(Json::as_str),
+            Some("@alice:gaussian.tech")
+        );
+        let devices = body.get("devices").and_then(Json::as_array).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(
+            devices[0].get("device_id").and_then(Json::as_str),
+            Some("DEV1")
+        );
+    }
+
+    #[test]
+    fn federation_user_devices_requires_a_signature() {
+        let resp = authed().dispatch(
+            Method::Get,
+            "/_matrix/federation/v1/user/devices/@alice:gaussian.tech",
         );
         assert_eq!(resp.status, 401);
         assert!(resp.body.contains("M_UNAUTHORIZED"));
