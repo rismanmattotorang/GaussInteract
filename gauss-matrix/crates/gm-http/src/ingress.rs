@@ -18,6 +18,8 @@
 //! - `POST /_matrix/client/v3/login` → password login, returning an access token;
 //! - `GET /_matrix/client/v3/account/whoami` → the token's user;
 //! - `GET /_matrix/client/v3/rooms/{roomId}/state` → the room's full state;
+//! - `GET /_matrix/client/v3/rooms/{roomId}/members` → the room's membership
+//!   events as a `{"chunk":[…]}`;
 //! - `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}[/{stateKey}]` → the
 //!   content of a state event;
 //! - `PUT /_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}` → send a
@@ -252,6 +254,7 @@ impl<H: Homeserver> Ingress<H> {
                 }
             }
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/state") => self.serve_room_state(m),
+            (Method::Get, "/_matrix/client/v3/rooms/{roomId}/members") => self.serve_members(m),
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}")
             | (Method::Get, "/_matrix/client/v3/rooms/{roomId}/state/{eventType}") => {
                 self.serve_state_event(m)
@@ -538,6 +541,31 @@ impl<H: Homeserver> Ingress<H> {
         };
         let state = self.server.room_state(&room);
         Response::json_ok(Json::Array(state.iter().map(Pdu::to_json).collect()).to_string())
+    }
+
+    /// `GET /_matrix/client/v3/rooms/{roomId}/members`: return the room's
+    /// `m.room.member` state events as a `{"chunk":[…]}` object. A malformed
+    /// room id is `400`; an unknown room is an empty chunk.
+    fn serve_members(&self, m: &RouteMatch) -> Response {
+        let Some(room_id) = m.param("roomId") else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let Ok(room) = RoomId::parse(room_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        let members: Vec<Json> = self
+            .server
+            .room_state(&room)
+            .iter()
+            .filter(|p| p.kind == gm_api::events::ROOM_MEMBER)
+            .map(Pdu::to_json)
+            .collect();
+        let mut obj = BTreeMap::new();
+        obj.insert("chunk".to_owned(), Json::Array(members));
+        Response::json_ok(Json::Object(obj).to_string())
     }
 
     /// `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}[/{stateKey}]`:
@@ -1189,6 +1217,34 @@ mod tests {
         assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
     }
 
+    #[test]
+    fn members_read_returns_only_membership_events_as_a_chunk() {
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/members",
+        )
+        .with_authorization("Bearer tok123");
+        let resp = server_with_members().handle(&req);
+        assert_eq!(resp.status, 200);
+        let parsed = Json::parse(&resp.body).unwrap();
+        let chunk = parsed.get("chunk").and_then(Json::as_array).unwrap();
+        // The two member events, not the message, are returned.
+        assert_eq!(chunk.len(), 2);
+        assert!(chunk
+            .iter()
+            .all(|e| e.get("type").and_then(Json::as_str) == Some("m.room.member")));
+    }
+
+    #[test]
+    fn members_read_requires_authentication() {
+        let resp = server_with_members().dispatch(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/members",
+        );
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
+    }
+
     const SEND_TARGET: &str =
         "/_matrix/client/v3/rooms/!room:gaussian.tech/send/m.room.message/txn7";
 
@@ -1252,6 +1308,21 @@ mod tests {
         }
     }
 
+    fn member_pdu(id: &str, user: &str) -> Pdu {
+        Pdu {
+            event_id: gm_util::EventId::parse(id).unwrap(),
+            room_id: RoomId::parse("!room:gaussian.tech").unwrap(),
+            sender: UserId::parse(user).unwrap(),
+            kind: "m.room.member".to_owned(),
+            state_key: Some(user.to_owned()),
+            origin_server_ts: 1,
+            depth: 1,
+            prev_events: Vec::new(),
+            auth_events: Vec::new(),
+            content_json: "{\"membership\":\"join\"}".to_owned(),
+        }
+    }
+
     fn server_with_timeline() -> Ingress<TestServer> {
         Ingress::with_server(TestServer {
             token: "tok123".to_owned(),
@@ -1259,6 +1330,22 @@ mod tests {
             password: "pw".to_owned(),
             state: BTreeMap::new(),
             timeline: vec![message_pdu("$e1", "hello"), message_pdu("$e2", "world")],
+        })
+    }
+
+    fn server_with_members() -> Ingress<TestServer> {
+        // The double's room_state echoes its timeline; seed it with two member
+        // events and a message so the members filter has something to drop.
+        Ingress::with_server(TestServer {
+            token: "tok123".to_owned(),
+            user: "@alice:gaussian.tech".to_owned(),
+            password: "pw".to_owned(),
+            state: BTreeMap::new(),
+            timeline: vec![
+                member_pdu("$m1", "@alice:gaussian.tech"),
+                member_pdu("$m2", "@bob:gaussian.tech"),
+                message_pdu("$e1", "hello"),
+            ],
         })
     }
 
