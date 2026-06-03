@@ -74,6 +74,12 @@ pub mod cf {
     /// `/_matrix/key/v2/server` document; an entry past `valid_until_ts` is
     /// stale and must be re-fetched before it is trusted.
     pub const KEY_CACHE: &str = "key_cache";
+    /// Published E2EE device keys (§VI.B): `{user}\u{1f}{device_id}` → the
+    /// opaque `device_keys` JSON, relayed verbatim (never decrypted).
+    pub const DEVICE_KEYS: &str = "device_keys";
+    /// One-time-key counts per device and algorithm (§VI.B):
+    /// `{user}\u{1f}{device_id}\u{1f}{algorithm}` → remaining count.
+    pub const DEVICE_OTK: &str = "device_otk";
 }
 
 /// A backend-agnostic, column-family keyed store.

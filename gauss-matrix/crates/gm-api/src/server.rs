@@ -122,6 +122,30 @@ pub trait Backfill {
     fn backfill(&self, room: &RoomId, from: &[String], limit: usize) -> Vec<Pdu>;
 }
 
+/// Relay E2EE device keys and one-time-key counts (the CS `keys/upload` and
+/// `keys/query` paths, and the SS `user/devices/{userId}` path; spec §VI.B).
+///
+/// The server stores and serves **opaque** key material — it never decrypts
+/// anything. A device publishes its `device_keys` (identity/signing public keys)
+/// and tops up its `one_time_keys`; other users (local or federated) query a
+/// user's devices to start encrypted sessions.
+pub trait DeviceKeyStore {
+    /// Store a device's published `device_keys` JSON under `(user, device_id)`.
+    fn store_device_keys(&self, user: &UserId, device_id: &str, device_keys_json: &str);
+
+    /// Add `counts` (per one-time-key algorithm) to a device's stored totals,
+    /// returning the new totals for every algorithm the device has.
+    fn add_one_time_keys(
+        &self,
+        user: &UserId,
+        device_id: &str,
+        counts: &[(String, u32)],
+    ) -> Vec<(String, u32)>;
+
+    /// The stored `(device_id, device_keys_json)` for each of `user`'s devices.
+    fn device_keys_of(&self, user: &UserId) -> Vec<(String, String)>;
+}
+
 /// Receive an inbound federation transaction (the SS `PUT /send/{txnId}` path).
 ///
 /// The argument is the transaction's JSON body and the result is the
@@ -296,6 +320,7 @@ pub trait Homeserver:
     + FederationAuth
     + ServerKeys
     + Backfill
+    + DeviceKeyStore
 {
 }
 
@@ -315,6 +340,7 @@ impl<T> Homeserver for T where
         + FederationAuth
         + ServerKeys
         + Backfill
+        + DeviceKeyStore
 {
 }
 
@@ -387,6 +413,23 @@ impl FederationReceiver for NoServer {
 
 impl Backfill for NoServer {
     fn backfill(&self, _room: &RoomId, _from: &[String], _limit: usize) -> Vec<Pdu> {
+        Vec::new()
+    }
+}
+
+impl DeviceKeyStore for NoServer {
+    fn store_device_keys(&self, _user: &UserId, _device_id: &str, _device_keys_json: &str) {}
+
+    fn add_one_time_keys(
+        &self,
+        _user: &UserId,
+        _device_id: &str,
+        _counts: &[(String, u32)],
+    ) -> Vec<(String, u32)> {
+        Vec::new()
+    }
+
+    fn device_keys_of(&self, _user: &UserId) -> Vec<(String, String)> {
         Vec::new()
     }
 }
