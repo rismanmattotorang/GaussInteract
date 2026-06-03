@@ -42,7 +42,7 @@ fn bearer(authorization: &str) -> Option<&str> {
 }
 
 /// The first value of query parameter `name` in a request target, if present.
-fn query_param(target: &str, name: &str) -> Option<String> {
+pub(crate) fn query_param(target: &str, name: &str) -> Option<String> {
     let query = target.split('?').nth(1)?;
     let query = query.split('#').next().unwrap_or(query);
     for pair in query.split('&') {

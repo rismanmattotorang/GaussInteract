@@ -26,7 +26,8 @@
 //! - `POST /_matrix/client/v3/createRoom` → originate a room, returning its id;
 //! - `POST /_matrix/client/v3/rooms/{roomId}/{join,leave,invite,kick,ban}` →
 //!   membership changes (authorized by the join-rules / power state machine);
-//! - `GET /_matrix/client/v3/sync` → the joined rooms with state and timeline;
+//! - `GET /_matrix/client/v3/sync[?since=…]` → joined rooms with state and
+//!   timeline (full), or only the events since the `?since=` token (incremental);
 //! - `PUT /_matrix/federation/v1/send/{txnId}` → ingest an inbound federation
 //!   transaction (PDUs/EDUs), returning the per-PDU acknowledgement;
 //! - `GET /_matrix/federation/v1/state/{roomId}` → the room's current state as
@@ -272,7 +273,7 @@ impl<H: Homeserver> Ingress<H> {
                 self.serve_membership_target(m, user, req, "ban")
             }
             (Method::Post, "/_matrix/client/v3/createRoom") => self.serve_create_room(user, req),
-            (Method::Get, "/_matrix/client/v3/sync") => self.serve_sync(user),
+            (Method::Get, "/_matrix/client/v3/sync") => self.serve_sync(user, req),
             (Method::Put, "/_matrix/federation/v1/send/{txnId}") => self.serve_federation_send(req),
             (Method::Get, "/_matrix/federation/v1/state/{roomId}") => {
                 self.serve_federation_state(m)
@@ -488,18 +489,19 @@ impl<H: Homeserver> Ingress<H> {
         Response::json_ok(Json::Object(obj).to_string())
     }
 
-    /// `GET /_matrix/client/v3/sync`: the authenticated user's joined rooms, each
-    /// with current state and timeline, plus the `next_batch` token. This is
-    /// initial sync — the full view; incremental deltas (`?since=`) are a later
-    /// refinement.
-    fn serve_sync(&self, user: Option<&UserId>) -> Response {
+    /// `GET /_matrix/client/v3/sync`: the authenticated user's rooms with state
+    /// and timeline, plus the `next_batch` token. Without `?since=` it is an
+    /// initial (full) sync; with a `?since=` token it returns only the events
+    /// that arrived after it.
+    fn serve_sync(&self, user: Option<&UserId>, req: &Request<'_>) -> Response {
         let Some(user) = user else {
             return Response::error(
                 401,
                 &MatrixError::unknown_token("unrecognized access token"),
             );
         };
-        Response::json_ok(sync_body(&self.server.sync(user)))
+        let since = crate::auth::query_param(req.target, "since");
+        Response::json_ok(sync_body(&self.server.sync(user, since.as_deref())))
     }
 
     /// `GET /_matrix/client/v3/rooms/{roomId}/messages`: return the room
@@ -848,7 +850,7 @@ mod tests {
         }
     }
     impl SyncProvider for TestServer {
-        fn sync(&self, _user: &UserId) -> gm_api::SyncView {
+        fn sync(&self, _user: &UserId, _since: Option<&str>) -> gm_api::SyncView {
             // One joined room carrying the double's timeline (no state).
             let joined = if self.timeline.is_empty() {
                 Vec::new()
