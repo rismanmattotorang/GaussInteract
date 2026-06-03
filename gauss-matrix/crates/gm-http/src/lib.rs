@@ -143,6 +143,10 @@ static SURFACE: &[Endpoint] = &[
         "/_matrix/client/v3/rooms/{roomId}/state/{eventType}",
     ),
     Endpoint::cs(Method::Get, "/_matrix/client/v3/rooms/{roomId}/messages"),
+    Endpoint::cs(
+        Method::Get,
+        "/_matrix/client/v3/rooms/{roomId}/event/{eventId}",
+    ),
     Endpoint::cs(Method::Post, "/_matrix/client/v3/rooms/{roomId}/join"),
     Endpoint::cs(Method::Post, "/_matrix/client/v3/rooms/{roomId}/leave"),
     Endpoint::cs(Method::Post, "/_matrix/client/v3/rooms/{roomId}/invite"),

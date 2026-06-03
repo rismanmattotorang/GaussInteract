@@ -28,6 +28,8 @@
 //!   message event, returning its event id (idempotent on the transaction id);
 //! - `GET /_matrix/client/v3/rooms/{roomId}/messages` → the room timeline as a
 //!   `{"chunk":[…]}` page;
+//! - `GET /_matrix/client/v3/rooms/{roomId}/event/{eventId}` → a single event
+//!   by id;
 //! - `POST /_matrix/client/v3/createRoom` → originate a room, returning its id;
 //! - `POST /_matrix/client/v3/rooms/{roomId}/{join,leave,invite,kick,ban}` →
 //!   membership changes (authorized by the join-rules / power state machine);
@@ -268,6 +270,9 @@ impl<H: Homeserver> Ingress<H> {
                 self.serve_send(m, user, req)
             }
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/messages") => self.serve_messages(m),
+            (Method::Get, "/_matrix/client/v3/rooms/{roomId}/event/{eventId}") => {
+                self.serve_event(m)
+            }
             (Method::Post, "/_matrix/client/v3/rooms/{roomId}/join") => {
                 self.serve_membership_self(m, user, "join")
             }
@@ -529,6 +534,30 @@ impl<H: Homeserver> Ingress<H> {
             return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
         };
         Response::json_ok(messages_body(&self.server.room_timeline(&room)))
+    }
+
+    /// `GET /_matrix/client/v3/rooms/{roomId}/event/{eventId}`: return a single
+    /// event from the room by id as its Matrix JSON, or `404 M_NOT_FOUND` if no
+    /// such event exists in the room. A malformed room id is `400`.
+    fn serve_event(&self, m: &RouteMatch) -> Response {
+        let (Some(room_id), Some(event_id)) = (m.param("roomId"), m.param("eventId")) else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let Ok(room) = RoomId::parse(room_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        match self
+            .server
+            .room_timeline(&room)
+            .iter()
+            .find(|p| p.event_id.as_str() == event_id)
+        {
+            Some(pdu) => Response::json_ok(pdu.to_json().to_string()),
+            None => Response::error(404, &MatrixError::not_found("event not found")),
+        }
     }
 
     /// `GET /_matrix/client/v3/rooms/{roomId}/state`: return the room's full
@@ -1476,6 +1505,48 @@ mod tests {
         let resp = server_with_timeline().dispatch(
             Method::Get,
             "/_matrix/client/v3/rooms/!room:gaussian.tech/messages",
+        );
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
+    }
+
+    #[test]
+    fn event_read_returns_the_event_by_id() {
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/event/$e2",
+        )
+        .with_authorization("Bearer tok123");
+        let resp = server_with_timeline().handle(&req);
+        assert_eq!(resp.status, 200);
+        let parsed = Json::parse(&resp.body).unwrap();
+        assert_eq!(parsed.get("event_id").and_then(Json::as_str), Some("$e2"));
+        assert_eq!(
+            parsed
+                .get("content")
+                .and_then(|c| c.get("body"))
+                .and_then(Json::as_str),
+            Some("world")
+        );
+    }
+
+    #[test]
+    fn missing_event_is_404_not_found() {
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/event/$nope",
+        )
+        .with_authorization("Bearer tok123");
+        let resp = server_with_timeline().handle(&req);
+        assert_eq!(resp.status, 404);
+        assert!(resp.body.contains("\"errcode\":\"M_NOT_FOUND\""));
+    }
+
+    #[test]
+    fn event_read_requires_authentication() {
+        let resp = server_with_timeline().dispatch(
+            Method::Get,
+            "/_matrix/client/v3/rooms/!room:gaussian.tech/event/$e1",
         );
         assert_eq!(resp.status, 401);
         assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
