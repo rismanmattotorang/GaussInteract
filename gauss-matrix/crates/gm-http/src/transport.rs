@@ -9,11 +9,12 @@
 //! [`Ingress::handle`], and writes the [`ingress::Response`] back — no
 //! dependencies, so it compiles and runs anywhere `std` does.
 //!
-//! It is deliberately minimal (one request per connection, no keep-alive or TLS).
-//! The production deployment swaps this for an async axum/hyper front that
-//! terminates TLS and multiplexes connections across a thread pool over a
-//! thread-safe store; the [`Ingress`] it drives, and the request/response
-//! contract, are identical.
+//! It is deliberately minimal (one request per connection, no keep-alive or
+//! TLS), but [`serve`] handles connections **concurrently** — each on its own
+//! thread, sharing the ingress over the thread-safe store. The production
+//! deployment swaps this for an async axum/hyper front that terminates TLS and
+//! multiplexes connections across a bounded pool; the [`Ingress`] it drives, and
+//! the request/response contract, are identical.
 
 use crate::ingress::{Ingress, Request, Response};
 use crate::Method;
@@ -211,16 +212,24 @@ pub fn serve_connection<H: Homeserver>(stream: &TcpStream, ingress: &Ingress<H>)
     Ok(())
 }
 
-/// Accept and serve connections on `listener` forever, one at a time.
+/// Accept connections on `listener` forever, serving each on its own thread.
 ///
-/// Single-threaded by design (the scaffold store is not thread-safe); the
-/// production transport multiplexes across a thread pool over a thread-safe
-/// store. Per-connection errors are swallowed so one bad client cannot stop the
-/// server.
-pub fn serve<H: Homeserver>(listener: &TcpListener, ingress: &Ingress<H>) -> io::Result<()> {
+/// The ingress is shared across connection threads via an [`Arc`]; this is
+/// sound because the composed homeserver fronts a thread-safe store
+/// (`gm_store::SharedStore`, an `Arc<RwLock<…>>`). Per-connection errors are
+/// swallowed so one bad client cannot stop the server. A spawn-per-connection
+/// model keeps the scaffold simple; a bounded pool is a later refinement.
+pub fn serve<H>(listener: &TcpListener, ingress: Ingress<H>) -> io::Result<()>
+where
+    H: Homeserver + Send + Sync + 'static,
+{
+    let ingress = std::sync::Arc::new(ingress);
     for connection in listener.incoming() {
         let stream = connection?;
-        let _ = serve_connection(&stream, ingress);
+        let ingress = std::sync::Arc::clone(&ingress);
+        std::thread::spawn(move || {
+            let _ = serve_connection(&stream, &ingress);
+        });
     }
     Ok(())
 }
@@ -380,6 +389,29 @@ mod tests {
 
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
         assert!(body_of(&response).contains("\"v1.11\""));
+    }
+
+    #[test]
+    fn serve_handles_concurrent_connections() {
+        // `serve` spawns a thread per connection; fire several at once and check
+        // they are all served. The serve loop runs forever on its own thread.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let _ = serve(&listener, Ingress::new());
+        });
+
+        let mut clients = Vec::new();
+        for _ in 0..16 {
+            clients.push(thread::spawn(move || {
+                send_request(addr, Method::Get, "/_matrix/client/versions", None, None).unwrap()
+            }));
+        }
+        for c in clients {
+            let (status, body) = c.join().unwrap();
+            assert_eq!(status, 200);
+            assert!(body.contains("\"v1.11\""));
+        }
     }
 
     #[test]

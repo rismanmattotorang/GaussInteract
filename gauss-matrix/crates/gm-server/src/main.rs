@@ -16,9 +16,10 @@
 //! - `GM_DEMO_ACCOUNT` — optional `localpart:password` to provision at boot, so
 //!   the server is usable immediately for a smoke test.
 //!
-//! The store is the in-memory [`gm_store::SharedStore`]; a persistent,
-//! thread-safe backend and an async transport are the production swaps (the
-//! ingress and service contracts are unchanged).
+//! The store is the in-memory, thread-safe [`gm_store::SharedStore`]
+//! (`Arc<RwLock<…>>`) and the transport serves each connection on its own
+//! thread; a persistent backend and an async transport are the production swaps
+//! (the ingress and service contracts are unchanged).
 
 use gm_http::ingress::Ingress;
 use gm_http::transport;
@@ -45,5 +46,7 @@ fn main() -> std::io::Result<()> {
     let ingress = Ingress::with_server(server);
     let listener = TcpListener::bind(&listen)?;
     eprintln!("GaussMatrix homeserver listening on {listen} (server name: {server_name})");
-    transport::serve(&listener, &ingress)
+    // The transport serves each connection on its own thread, sharing the
+    // ingress over the thread-safe store.
+    transport::serve(&listener, ingress)
 }
