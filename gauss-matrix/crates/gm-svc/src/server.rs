@@ -84,6 +84,90 @@ impl<S: Store + Clone> GaussServer<S> {
             .and_then(|v| String::from_utf8(v).ok())
     }
 
+    /// Cache a fetched verify key for `(origin, key_id)`, trusted until
+    /// `valid_until_ts` (ms). Normally populated by [`Self::ingest_key_document`].
+    pub fn cache_server_key(&self, origin: &str, key_id: &str, public: &str, valid_until_ts: u64) {
+        let mut store = self.store.clone();
+        let cache_key = format!("{origin}{TXN_SEP}{key_id}");
+        let value = format!("{public}{TXN_SEP}{valid_until_ts}");
+        store.put(cf::KEY_CACHE, &cache_key, value.as_bytes());
+    }
+
+    /// The cached verify key for `(origin, key_id)`, but only if it has not yet
+    /// passed its `valid_until_ts` — a stale entry must be re-fetched.
+    fn cached_key(&self, origin: &str, key_id: &str) -> Option<String> {
+        let cache_key = format!("{origin}{TXN_SEP}{key_id}");
+        let raw = String::from_utf8(self.store.get(cf::KEY_CACHE, &cache_key)?).ok()?;
+        let (public, valid_until) = raw.split_once(TXN_SEP)?;
+        let valid_until: u64 = valid_until.parse().ok()?;
+        (now_ms() < valid_until).then(|| public.to_owned())
+    }
+
+    /// Ingest a fetched `/_matrix/key/v2/server` document. The document's
+    /// self-signature is verified against the public keys it advertises (at least
+    /// one `signatures[server_name][key_id]` must verify over the canonical,
+    /// signatures-free document under that key). On success every advertised
+    /// verify key is cached under the document's `server_name`, trusted until its
+    /// `valid_until_ts`; an already-expired or unsigned document is rejected.
+    /// Returns whether the document was ingested.
+    pub fn ingest_key_document(&self, doc: &Json) -> bool {
+        let Some(server_name) = doc.get("server_name").and_then(Json::as_str) else {
+            return false;
+        };
+        let Some(valid_until_ts) = doc.get("valid_until_ts").and_then(Json::as_u64) else {
+            return false;
+        };
+        if valid_until_ts <= now_ms() {
+            return false; // already stale
+        }
+        let Some(Json::Object(verify_keys)) = doc.get("verify_keys") else {
+            return false;
+        };
+        let signatures = doc
+            .get("signatures")
+            .and_then(|s| s.get(server_name))
+            .and_then(Json::as_object);
+        let Some(signatures) = signatures else {
+            return false;
+        };
+
+        // Reconstruct the canonical signatures-free document the origin signed.
+        let mut unsigned = doc.clone();
+        if let Json::Object(map) = &mut unsigned {
+            map.remove("signatures");
+        }
+        let canonical = unsigned.to_string();
+
+        // At least one advertised key must validate its own signature.
+        let mut any_valid = false;
+        for (key_id, sig) in signatures {
+            let (Some(sig), Some(public)) = (
+                sig.as_str(),
+                verify_keys
+                    .get(key_id)
+                    .and_then(|e| e.get("key"))
+                    .and_then(Json::as_str),
+            ) else {
+                continue;
+            };
+            if gm_fed::ed25519::verify_b64(canonical.as_bytes(), sig, public) {
+                any_valid = true;
+                break;
+            }
+        }
+        if !any_valid {
+            return false;
+        }
+
+        // Cache every advertised verify key under the document's server name.
+        for (key_id, entry) in verify_keys {
+            if let Some(public) = entry.get("key").and_then(Json::as_str) {
+                self.cache_server_key(server_name, key_id, public, valid_until_ts);
+            }
+        }
+        true
+    }
+
     /// Register one of this server's own signing keys under `key_id` (e.g.
     /// `ed25519:1`). `seed` is the base64 32-byte Ed25519 secret seed (see
     /// [`gm_fed::ed25519::seed_from_material`] to derive one). The seed is stored
@@ -434,8 +518,14 @@ impl<S: Store + Clone> FederationAuth for GaussServer<S> {
                 return false;
             }
         }
-        let Some(key) = self.federation_key(&auth.origin) else {
-            return false; // origin's key is unknown -> cannot verify
+        // Prefer a fresh cached key for this (origin, key_id) — ingested from the
+        // origin's `/key/v2/server` document and honoured only until its
+        // `valid_until_ts` — then fall back to an operator-provisioned key.
+        let Some(key) = self
+            .cached_key(&auth.origin, &auth.key_id)
+            .or_else(|| self.federation_key(&auth.origin))
+        else {
+            return false; // origin's key is unknown or stale -> cannot verify
         };
         let bytes = fed_auth::signing_bytes(method, uri, &auth.origin, &self.server_name, content);
         fed_auth::verify(&bytes, &auth.signature, &key)
@@ -1212,6 +1302,76 @@ mod tests {
         }
         .to_header();
         assert!(!s.verify_federation_request("PUT", uri, Some(body), Some(&unknown_origin)));
+    }
+
+    #[test]
+    fn ingesting_a_key_document_lets_requests_verify_against_the_cache() {
+        // Server A publishes its key document; server B ingests it and can then
+        // verify A's requests with no key pre-registered.
+        let a_seed = gm_fed::ed25519::seed_from_material("a.tld:ed25519:1");
+        let server_a = GaussServer::new(SharedStore::new(), "a.tld");
+        server_a.register_signing_key("ed25519:1", &a_seed);
+        let key_doc = server_a.server_keys();
+
+        let b = GaussServer::new(SharedStore::new(), "b.tld");
+        assert!(b.ingest_key_document(&key_doc));
+
+        let uri = "/_matrix/federation/v1/send/t1";
+        let body = r#"{"pdus":[]}"#;
+        let bytes = gm_fed::auth::signing_bytes("PUT", uri, "a.tld", "b.tld", Some(body));
+        let header = gm_fed::auth::XMatrixAuth {
+            origin: "a.tld".to_owned(),
+            destination: Some("b.tld".to_owned()),
+            key_id: "ed25519:1".to_owned(),
+            signature: gm_fed::auth::sign(&bytes, &a_seed),
+        }
+        .to_header();
+        assert!(b.verify_federation_request("PUT", uri, Some(body), Some(&header)));
+    }
+
+    #[test]
+    fn a_tampered_key_document_is_not_ingested() {
+        let a_seed = gm_fed::ed25519::seed_from_material("a.tld:ed25519:1");
+        let server_a = GaussServer::new(SharedStore::new(), "a.tld");
+        server_a.register_signing_key("ed25519:1", &a_seed);
+        let mut key_doc = server_a.server_keys();
+
+        // Swap the advertised key for a different public key: the self-signature
+        // no longer matches, so the document must be rejected.
+        if let Json::Object(map) = &mut key_doc {
+            let other =
+                gm_fed::ed25519::public_key_b64(&gm_fed::ed25519::seed_from_material("impostor"))
+                    .unwrap();
+            let mut entry = BTreeMap::new();
+            entry.insert("key".to_owned(), Json::String(other));
+            let mut vk = BTreeMap::new();
+            vk.insert("ed25519:1".to_owned(), Json::Object(entry));
+            map.insert("verify_keys".to_owned(), Json::Object(vk));
+        }
+        let b = GaussServer::new(SharedStore::new(), "b.tld");
+        assert!(!b.ingest_key_document(&key_doc));
+    }
+
+    #[test]
+    fn an_expired_cached_key_is_not_trusted() {
+        let a_seed = gm_fed::ed25519::seed_from_material("a.tld:ed25519:1");
+        let a_public = gm_fed::ed25519::public_key_b64(&a_seed).unwrap();
+        let b = GaussServer::new(SharedStore::new(), "b.tld");
+        // Cache A's key with an already-elapsed validity.
+        b.cache_server_key("a.tld", "ed25519:1", &a_public, 1);
+
+        let uri = "/_matrix/federation/v1/send/t1";
+        let body = r#"{"pdus":[]}"#;
+        let bytes = gm_fed::auth::signing_bytes("PUT", uri, "a.tld", "b.tld", Some(body));
+        let header = gm_fed::auth::XMatrixAuth {
+            origin: "a.tld".to_owned(),
+            destination: Some("b.tld".to_owned()),
+            key_id: "ed25519:1".to_owned(),
+            signature: gm_fed::auth::sign(&bytes, &a_seed),
+        }
+        .to_header();
+        // The cached key is stale and there is no fallback, so verification fails.
+        assert!(!b.verify_federation_request("PUT", uri, Some(body), Some(&header)));
     }
 
     #[test]
