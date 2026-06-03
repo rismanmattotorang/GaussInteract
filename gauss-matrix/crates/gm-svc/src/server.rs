@@ -160,22 +160,24 @@ impl<S: Store + Clone> SyncProvider for GaussServer<S> {
             .and_then(|t| t.strip_prefix('s'))
             .and_then(|n| n.parse::<usize>().ok());
 
-        let joined = match from {
-            None => rooms
-                .rooms()
-                .into_iter()
-                .filter(|room| self.is_joined(&rooms, room, user))
-                .map(|room| JoinedRoom {
-                    state: rooms.current_state_pdus(&room),
-                    timeline: rooms.timeline(&room),
-                    room,
-                })
-                .collect(),
+        let (joined, left) = match from {
+            None => {
+                // Initial sync: every joined room, full state + timeline. (A
+                // `leave` section is only meaningful relative to a prior token.)
+                let joined = rooms
+                    .rooms()
+                    .into_iter()
+                    .filter(|room| self.is_joined(&rooms, room, user))
+                    .map(|room| JoinedRoom {
+                        state: rooms.current_state_pdus(&room),
+                        timeline: rooms.timeline(&room),
+                        room,
+                    })
+                    .collect();
+                (joined, Vec::new())
+            }
             Some(pos) => {
-                // Only the events that arrived since the token, grouped per room,
-                // for rooms the user is joined to. State is the state events among
-                // the delta — except a room the user first joined in this window,
-                // which carries its full current state (see below).
+                // The events that arrived since the token, grouped per room.
                 let mut by_room: std::collections::BTreeMap<String, Vec<Pdu>> =
                     std::collections::BTreeMap::new();
                 for pdu in rooms.events_since(pos) {
@@ -184,13 +186,14 @@ impl<S: Store + Clone> SyncProvider for GaussServer<S> {
                         .or_default()
                         .push(pdu);
                 }
-                by_room
-                    .into_iter()
-                    .filter_map(|(room_str, timeline)| {
-                        let room = RoomId::parse(room_str).ok()?;
-                        if !self.is_joined(&rooms, &room, user) {
-                            return None;
-                        }
+
+                let mut joined = Vec::new();
+                let mut left = Vec::new();
+                for (room_str, timeline) in by_room {
+                    let Ok(room) = RoomId::parse(room_str) else {
+                        continue;
+                    };
+                    if self.is_joined(&rooms, &room, user) {
                         // If the user's own join lands within this delta they are
                         // seeing the room for the first time, so carry its full
                         // current state (as an initial sync would) rather than only
@@ -202,17 +205,26 @@ impl<S: Store + Clone> SyncProvider for GaussServer<S> {
                         } else {
                             timeline.iter().filter(|p| p.is_state()).cloned().collect()
                         };
-                        Some(JoinedRoom {
+                        joined.push(JoinedRoom {
                             room,
                             state,
                             timeline,
-                        })
-                    })
-                    .collect()
+                        });
+                    } else if left_in_delta(&timeline, user) {
+                        // The user's own membership became `leave`/`ban` in this
+                        // window: report the room as left so the client drops it.
+                        left.push(gm_api::LeftRoom { room, timeline });
+                    }
+                }
+                (joined, left)
             }
         };
 
-        SyncView { next_batch, joined }
+        SyncView {
+            next_batch,
+            joined,
+            left,
+        }
     }
 }
 
@@ -451,6 +463,26 @@ fn joined_in_delta(delta: &[Pdu], user: &UserId) -> bool {
                 })
                 .as_deref()
                 == Some("join")
+    })
+}
+
+/// Whether `user`'s own membership becomes `leave` or `ban` within `delta` —
+/// i.e. they left (or were kicked/banned) in this sync window, so it belongs in
+/// the `leave` section.
+fn left_in_delta(delta: &[Pdu], user: &UserId) -> bool {
+    delta.iter().any(|pdu| {
+        pdu.kind == events::ROOM_MEMBER
+            && pdu.state_key.as_deref() == Some(user.as_str())
+            && matches!(
+                Json::parse(&pdu.content_json)
+                    .ok()
+                    .and_then(|c| c
+                        .get("membership")
+                        .and_then(Json::as_str)
+                        .map(str::to_owned))
+                    .as_deref(),
+                Some("leave") | Some("ban")
+            )
     })
 }
 
@@ -731,6 +763,39 @@ mod tests {
         // Only the new message arrived; it is not a state event, so no full state.
         assert!(delta2.joined[0].state.is_empty());
         assert_eq!(delta2.joined[0].timeline.len(), 1);
+    }
+
+    #[test]
+    fn incremental_sync_reports_a_room_the_user_left_in_the_window() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let bob = UserId::parse("@bob:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+        s.change_membership(&alice, &room, &bob, "invite").unwrap();
+        s.change_membership(&bob, &room, &bob, "join").unwrap();
+
+        // Bob, now a member, takes a token; then alice kicks him (sets leave).
+        let token = s.sync(&bob, None).next_batch;
+        s.change_membership(&alice, &room, &bob, "leave").unwrap();
+
+        let delta = s.sync(&bob, Some(&token));
+        // The room he left is not in `joined`, but is reported in `left`.
+        assert!(delta.joined.is_empty());
+        assert_eq!(delta.left.len(), 1);
+        assert_eq!(delta.left[0].room, room);
+        // The window carries the membership change that removed him.
+        assert!(
+            delta.left[0]
+                .timeline
+                .iter()
+                .any(|p| p.kind == events::ROOM_MEMBER
+                    && p.state_key.as_deref() == Some(bob.as_str()))
+        );
+
+        // After catching up, the left room no longer appears at all.
+        let after = s.sync(&bob, Some(&delta.next_batch));
+        assert!(after.joined.is_empty());
+        assert!(after.left.is_empty());
     }
 
     #[test]

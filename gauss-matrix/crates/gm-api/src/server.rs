@@ -48,14 +48,27 @@ pub struct JoinedRoom {
     pub timeline: Vec<Pdu>,
 }
 
+/// One room a user left within a sync window: the timeline up to and including
+/// the membership change that removed them, so a client can drop the room.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeftRoom {
+    /// The room.
+    pub room: RoomId,
+    /// The room's timeline within the window, oldest first.
+    pub timeline: Vec<Pdu>,
+}
+
 /// A user's sync view: the rooms they have joined, each with state and timeline,
-/// plus the pagination token a subsequent sync resumes from.
+/// the rooms they left in this window, plus the pagination token a subsequent
+/// sync resumes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncView {
     /// The token to pass as `?since=` on the next sync.
     pub next_batch: String,
     /// The rooms the user is joined to.
     pub joined: Vec<JoinedRoom>,
+    /// The rooms the user left (or was kicked/banned from) within the window.
+    pub left: Vec<LeftRoom>,
 }
 
 /// Build a user's sync view (the CS `/sync` path).
@@ -63,7 +76,8 @@ pub trait SyncProvider {
     /// The sync view for `user`. With `since = None` it is an **initial sync**
     /// (full state + timeline of every joined room); with a `since` token from a
     /// prior `next_batch` it is an **incremental sync** (only the events that
-    /// arrived after that token). Always returns the `next_batch` to resume from.
+    /// arrived after that token, plus any rooms left in the window). Always
+    /// returns the `next_batch` to resume from.
     fn sync(&self, user: &UserId, since: Option<&str>) -> SyncView;
 }
 
@@ -252,6 +266,7 @@ impl SyncProvider for NoServer {
         SyncView {
             next_batch: "s0".to_owned(),
             joined: Vec::new(),
+            left: Vec::new(),
         }
     }
 }
