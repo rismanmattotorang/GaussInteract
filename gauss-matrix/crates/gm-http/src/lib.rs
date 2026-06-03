@@ -173,6 +173,8 @@ static SURFACE: &[Endpoint] = &[
         Method::Post,
         "/_matrix/client/v3/rooms/{roomId}/receipt/{receiptType}/{eventId}",
     ),
+    Endpoint::cs(Method::Put, "/_matrix/client/v3/presence/{userId}/status"),
+    Endpoint::cs(Method::Get, "/_matrix/client/v3/presence/{userId}/status"),
     Endpoint::cs(
         Method::Put,
         "/_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}",

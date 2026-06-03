@@ -18,8 +18,8 @@ use crate::{AccountStore, RoomService, SessionStore};
 use gm_api::events;
 use gm_api::{
     FederationAuth, FederationReceiver, JoinedRoom, Json, Login, LoginGrant, MembershipChanger,
-    MessageSender, Pdu, ReceiptSetter, RoomCreator, RoomReader, RoomTimeline, RoomVersion,
-    ServerKeys, SyncProvider, SyncView, TokenAuthority, TypingNotifier,
+    MessageSender, Pdu, PresenceStore, ReceiptSetter, RoomCreator, RoomReader, RoomTimeline,
+    RoomVersion, ServerKeys, SyncProvider, SyncView, TokenAuthority, TypingNotifier,
 };
 use gm_fed::{auth as fed_auth, Transaction};
 use gm_store::{cf, Store};
@@ -160,6 +160,33 @@ impl<S: Store + Clone> GaussServer<S> {
         receipts
     }
 
+    /// The presence of every user who shares a joined room with `user`
+    /// (including `user`), for those who have recorded presence — the top-level
+    /// `presence` block of a sync. Users are de-duplicated and id-ordered.
+    fn co_resident_presence(&self, user: &UserId) -> Vec<gm_api::PresenceUpdate> {
+        let rooms = RoomService::new(self.store.clone());
+        let mut seen: Vec<UserId> = Vec::new();
+        for room in rooms.rooms() {
+            if !self.is_joined(&rooms, &room, user) {
+                continue;
+            }
+            for pdu in rooms.current_state_pdus(&room) {
+                if pdu.kind != events::ROOM_MEMBER {
+                    continue;
+                }
+                let Some(member) = pdu.state_key.as_deref().and_then(|s| UserId::parse(s).ok())
+                else {
+                    continue;
+                };
+                if !seen.contains(&member) {
+                    seen.push(member);
+                }
+            }
+        }
+        seen.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        seen.iter().filter_map(|u| self.presence_for(u)).collect()
+    }
+
     /// Mint a fresh room id on this server. Uniqueness (scaffold) comes from the
     /// creator, the live event count and the clock; production uses a CSPRNG.
     fn mint_room_id(&self, creator: &UserId) -> Option<RoomId> {
@@ -289,6 +316,7 @@ impl<S: Store + Clone> SyncProvider for GaussServer<S> {
             next_batch,
             joined,
             left,
+            presence: self.co_resident_presence(user),
         }
     }
 }
@@ -594,6 +622,25 @@ impl<S: Store + Clone> ReceiptSetter for GaussServer<S> {
         let mut store = self.store.clone();
         store.put(cf::RECEIPTS, &key, value.as_bytes());
         true
+    }
+}
+
+impl<S: Store + Clone> PresenceStore for GaussServer<S> {
+    fn set_presence(&self, user: &UserId, presence: &str, status_msg: Option<&str>) -> bool {
+        let value = format!("{presence}{TXN_SEP}{}", status_msg.unwrap_or(""));
+        let mut store = self.store.clone();
+        store.put(cf::PRESENCE, user.as_str(), value.as_bytes());
+        true
+    }
+
+    fn presence_for(&self, user: &UserId) -> Option<gm_api::PresenceUpdate> {
+        let raw = String::from_utf8(self.store.get(cf::PRESENCE, user.as_str())?).ok()?;
+        let (presence, status_msg) = raw.split_once(TXN_SEP).unwrap_or((raw.as_str(), ""));
+        Some(gm_api::PresenceUpdate {
+            user: user.clone(),
+            presence: presence.to_owned(),
+            status_msg: (!status_msg.is_empty()).then(|| status_msg.to_owned()),
+        })
     }
 }
 
@@ -986,6 +1033,32 @@ mod tests {
         let view = s.sync(&alice, None);
         let jr = view.joined.iter().find(|j| j.room == room).unwrap();
         assert!(jr.typing.is_empty());
+    }
+
+    #[test]
+    fn presence_is_set_read_and_surfaced_to_co_residents() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let bob = UserId::parse("@bob:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+        s.change_membership(&alice, &room, &bob, "invite").unwrap();
+        s.change_membership(&bob, &room, &bob, "join").unwrap();
+
+        // bob sets presence; it reads back and surfaces on alice's sync.
+        assert!(s.set_presence(&bob, "online", Some("brb")));
+        let p = s.presence_for(&bob).unwrap();
+        assert_eq!(p.presence, "online");
+        assert_eq!(p.status_msg.as_deref(), Some("brb"));
+
+        let view = s.sync(&alice, None);
+        let bob_presence = view.presence.iter().find(|p| p.user == bob).unwrap();
+        assert_eq!(bob_presence.presence, "online");
+
+        // A user who shares no room with carol does not see carol's presence.
+        let carol = UserId::parse("@carol:gaussian.tech").unwrap();
+        assert!(s.set_presence(&carol, "online", None));
+        let view = s.sync(&alice, None);
+        assert!(view.presence.iter().all(|p| p.user != carol));
     }
 
     #[test]

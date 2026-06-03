@@ -37,6 +37,8 @@
 //!   typing state (surfaced as the `m.typing` ephemeral EDU on sync);
 //! - `POST /_matrix/client/v3/rooms/{roomId}/receipt/{receiptType}/{eventId}` →
 //!   record the caller's read receipt (the `m.receipt` ephemeral EDU on sync);
+//! - `PUT`/`GET /_matrix/client/v3/presence/{userId}/status` → set / read a
+//!   user's presence (the top-level `m.presence` EDU on sync);
 //! - `GET /_matrix/client/v3/sync[?since=…]` → joined rooms with state and
 //!   timeline (full), or only the events since the `?since=` token plus rooms
 //!   left in the window (incremental);
@@ -281,6 +283,12 @@ impl<H: Homeserver> Ingress<H> {
             (Method::Post, "/_matrix/client/v3/rooms/{roomId}/receipt/{receiptType}/{eventId}") => {
                 self.serve_receipt(m, user)
             }
+            (Method::Put, "/_matrix/client/v3/presence/{userId}/status") => {
+                self.serve_set_presence(m, user, req)
+            }
+            (Method::Get, "/_matrix/client/v3/presence/{userId}/status") => {
+                self.serve_get_presence(m)
+            }
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/messages") => self.serve_messages(m),
             (Method::Get, "/_matrix/client/v3/rooms/{roomId}/event/{eventId}") => {
                 self.serve_event(m)
@@ -453,6 +461,83 @@ impl<H: Homeserver> Ingress<H> {
                 403,
                 &MatrixError::forbidden("not permitted to post a receipt in this room"),
             )
+        }
+    }
+
+    /// `PUT /_matrix/client/v3/presence/{userId}/status`: set the caller's
+    /// presence. The body is `{"presence":"online"|"offline"|"unavailable",
+    /// "status_msg"?:string}`; `presence` must be present. A user may only set
+    /// their own presence (`{userId}` must be the caller), else `403`.
+    fn serve_set_presence(
+        &self,
+        m: &RouteMatch,
+        user: Option<&UserId>,
+        req: &Request<'_>,
+    ) -> Response {
+        let Some(caller) = user else {
+            return Response::error(
+                401,
+                &MatrixError::unknown_token("unrecognized access token"),
+            );
+        };
+        let Some(user_id) = m.param("userId") else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        if user_id != caller.as_str() {
+            return Response::error(
+                403,
+                &MatrixError::forbidden("cannot set another user's presence"),
+            );
+        }
+        let Ok(Json::Object(body)) = Json::parse(req.body.unwrap_or("")) else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_BAD_JSON", "body must be an object"),
+            );
+        };
+        let Some(presence) = body.get("presence").and_then(Json::as_str) else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_BAD_JSON", "missing string `presence`"),
+            );
+        };
+        let status_msg = body.get("status_msg").and_then(Json::as_str);
+        if self.server.set_presence(caller, presence, status_msg) {
+            Response::json_ok("{}".to_owned())
+        } else {
+            Response::error(
+                403,
+                &MatrixError::forbidden("not permitted to set presence"),
+            )
+        }
+    }
+
+    /// `GET /_matrix/client/v3/presence/{userId}/status`: read a user's current
+    /// presence as `{"presence":…,"status_msg"?:…}`, or `404 M_NOT_FOUND` if no
+    /// presence has been recorded for them.
+    fn serve_get_presence(&self, m: &RouteMatch) -> Response {
+        let Some(user_id) = m.param("userId") else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let Ok(user) = UserId::parse(user_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid user id"));
+        };
+        match self.server.presence_for(&user) {
+            Some(p) => {
+                let mut obj = BTreeMap::new();
+                obj.insert("presence".to_owned(), Json::String(p.presence));
+                if let Some(msg) = p.status_msg {
+                    obj.insert("status_msg".to_owned(), Json::String(msg));
+                }
+                Response::json_ok(Json::Object(obj).to_string())
+            }
+            None => Response::error(404, &MatrixError::not_found("no presence for this user")),
         }
     }
 
@@ -948,12 +1033,37 @@ fn sync_body(view: &SyncView) -> String {
     let mut rooms = BTreeMap::new();
     rooms.insert("join".to_owned(), Json::Object(join));
     rooms.insert("leave".to_owned(), Json::Object(leave));
+
+    // Top-level presence: one m.presence EDU per user with recorded presence.
+    let presence_events: Vec<Json> = view
+        .presence
+        .iter()
+        .map(|p| {
+            let mut content = BTreeMap::new();
+            content.insert("presence".to_owned(), Json::String(p.presence.clone()));
+            if let Some(msg) = &p.status_msg {
+                content.insert("status_msg".to_owned(), Json::String(msg.clone()));
+            }
+            let mut edu = BTreeMap::new();
+            edu.insert("type".to_owned(), Json::String("m.presence".to_owned()));
+            edu.insert(
+                "sender".to_owned(),
+                Json::String(p.user.as_str().to_owned()),
+            );
+            edu.insert("content".to_owned(), Json::Object(content));
+            Json::Object(edu)
+        })
+        .collect();
+    let mut presence = BTreeMap::new();
+    presence.insert("events".to_owned(), Json::Array(presence_events));
+
     let mut top = BTreeMap::new();
     top.insert(
         "next_batch".to_owned(),
         Json::String(view.next_batch.clone()),
     );
     top.insert("rooms".to_owned(), Json::Object(rooms));
+    top.insert("presence".to_owned(), Json::Object(presence));
     Json::Object(top).to_string()
 }
 
@@ -1022,8 +1132,8 @@ mod tests {
     use super::*;
     use gm_api::{
         FederationAuth, FederationReceiver, JoinedRoom, Login, MembershipChanger, MessageSender,
-        ReceiptSetter, RoomCreator, RoomReader, RoomTimeline, ServerKeys, SyncProvider,
-        TokenAuthority, TypingNotifier,
+        PresenceStore, ReceiptSetter, RoomCreator, RoomReader, RoomTimeline, ServerKeys,
+        SyncProvider, TokenAuthority, TypingNotifier,
     };
     use std::collections::BTreeMap;
 
@@ -1176,6 +1286,21 @@ mod tests {
             user.as_str() == self.user
         }
     }
+    impl PresenceStore for TestServer {
+        fn set_presence(&self, user: &UserId, _presence: &str, _status_msg: Option<&str>) -> bool {
+            // The double accepts presence for its own configured user.
+            user.as_str() == self.user
+        }
+
+        fn presence_for(&self, user: &UserId) -> Option<gm_api::PresenceUpdate> {
+            // The double reports its configured user as online; others unknown.
+            (user.as_str() == self.user).then(|| gm_api::PresenceUpdate {
+                user: user.clone(),
+                presence: "online".to_owned(),
+                status_msg: None,
+            })
+        }
+    }
     impl SyncProvider for TestServer {
         fn sync(&self, _user: &UserId, _since: Option<&str>) -> gm_api::SyncView {
             // One joined room carrying the double's timeline (no state).
@@ -1194,6 +1319,7 @@ mod tests {
                 next_batch: "s1".to_owned(),
                 joined,
                 left: Vec::new(),
+                presence: Vec::new(),
             }
         }
     }
@@ -1965,6 +2091,80 @@ mod tests {
         let resp = authed().dispatch(Method::Post, RECEIPT_TARGET);
         assert_eq!(resp.status, 401);
         assert!(resp.body.contains("\"errcode\":\"M_MISSING_TOKEN\""));
+    }
+
+    const PRESENCE_TARGET: &str = "/_matrix/client/v3/presence/@alice:gaussian.tech/status";
+
+    #[test]
+    fn setting_own_presence_is_accepted() {
+        let req = Request::new(Method::Put, PRESENCE_TARGET)
+            .with_authorization("Bearer tok123")
+            .with_body(r#"{"presence":"online","status_msg":"hi"}"#);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, "{}");
+    }
+
+    #[test]
+    fn setting_another_users_presence_is_forbidden() {
+        let req = Request::new(
+            Method::Put,
+            "/_matrix/client/v3/presence/@bob:gaussian.tech/status",
+        )
+        .with_authorization("Bearer tok123")
+        .with_body(r#"{"presence":"online"}"#);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 403);
+        assert!(resp.body.contains("\"errcode\":\"M_FORBIDDEN\""));
+    }
+
+    #[test]
+    fn presence_without_a_state_is_400() {
+        let req = Request::new(Method::Put, PRESENCE_TARGET)
+            .with_authorization("Bearer tok123")
+            .with_body(r#"{"status_msg":"hi"}"#);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("\"errcode\":\"M_BAD_JSON\""));
+    }
+
+    #[test]
+    fn reading_presence_returns_the_status() {
+        let req = Request::new(Method::Get, PRESENCE_TARGET).with_authorization("Bearer tok123");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        let parsed = Json::parse(&resp.body).unwrap();
+        assert_eq!(
+            parsed.get("presence").and_then(Json::as_str),
+            Some("online")
+        );
+    }
+
+    #[test]
+    fn reading_presence_of_an_unknown_user_is_404() {
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/client/v3/presence/@nobody:gaussian.tech/status",
+        )
+        .with_authorization("Bearer tok123");
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 404);
+        assert!(resp.body.contains("\"errcode\":\"M_NOT_FOUND\""));
+    }
+
+    #[test]
+    fn sync_carries_a_top_level_presence_block() {
+        let req = Request::new(Method::Get, "/_matrix/client/v3/sync")
+            .with_authorization("Bearer tok123");
+        let resp = server_with_timeline().handle(&req);
+        let body = Json::parse(&resp.body).unwrap();
+        // The presence block is always present (empty events when none).
+        let events = body
+            .get("presence")
+            .and_then(|p| p.get("events"))
+            .and_then(Json::as_array)
+            .expect("a presence.events array");
+        assert!(events.is_empty());
     }
 
     #[test]
