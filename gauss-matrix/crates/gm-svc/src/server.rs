@@ -205,6 +205,20 @@ impl<S: Store + Clone> GaussServer<S> {
         map.entry(room.as_str().to_owned()).or_default().clone()
     }
 
+    /// The remaining one-time-key count per algorithm for a device, derived by
+    /// scanning the stored keys (whose `key_id` is `algorithm:id`).
+    fn one_time_key_counts(&self, user: &UserId, device_id: &str) -> Vec<(String, u32)> {
+        let prefix = format!("{}{TXN_SEP}{device_id}{TXN_SEP}", user.as_str());
+        let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+        for (k, _) in self.store.scan(cf::DEVICE_OTK) {
+            if let Some(key_id) = k.strip_prefix(&prefix) {
+                let alg = key_id.split(':').next().unwrap_or(key_id);
+                *counts.entry(alg.to_owned()).or_insert(0) += 1;
+            }
+        }
+        counts.into_iter().collect()
+    }
+
     /// Whether `user`'s current `m.room.member` state in `room` is `join`.
     fn is_joined(&self, rooms: &RoomService<S>, room: &RoomId, user: &UserId) -> bool {
         let Some(content) = rooms.state_event_content(room, events::ROOM_MEMBER, user.as_str())
@@ -589,34 +603,42 @@ impl<S: Store + Clone> DeviceKeyStore for GaussServer<S> {
         store.put(cf::DEVICE_KEYS, &key, device_keys_json.as_bytes());
     }
 
-    fn add_one_time_keys(
+    fn store_one_time_keys(
         &self,
         user: &UserId,
         device_id: &str,
-        counts: &[(String, u32)],
+        keys: &[(String, String)],
     ) -> Vec<(String, u32)> {
         let mut store = self.store.clone();
         let prefix = format!("{}{TXN_SEP}{device_id}{TXN_SEP}", user.as_str());
-        for (alg, n) in counts {
-            let key = format!("{prefix}{alg}");
-            let current: u32 = self
-                .store
-                .get(cf::DEVICE_OTK, &key)
-                .and_then(|v| String::from_utf8(v).ok())
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            store.put(cf::DEVICE_OTK, &key, (current + n).to_string().as_bytes());
+        for (key_id, json) in keys {
+            store.put(
+                cf::DEVICE_OTK,
+                &format!("{prefix}{key_id}"),
+                json.as_bytes(),
+            );
         }
-        // Return the totals for every algorithm this device has.
-        self.store
+        self.one_time_key_counts(user, device_id)
+    }
+
+    fn claim_one_time_key(
+        &self,
+        user: &UserId,
+        device_id: &str,
+        algorithm: &str,
+    ) -> Option<(String, String)> {
+        let prefix = format!("{}{TXN_SEP}{device_id}{TXN_SEP}", user.as_str());
+        let alg_prefix = format!("{prefix}{algorithm}:");
+        let (full_key, value) = self
+            .store
             .scan(cf::DEVICE_OTK)
             .into_iter()
-            .filter_map(|(k, v)| {
-                let alg = k.strip_prefix(&prefix)?;
-                let total: u32 = String::from_utf8(v).ok()?.parse().ok()?;
-                Some((alg.to_owned(), total))
-            })
-            .collect()
+            .find(|(k, _)| k.starts_with(&alg_prefix))?;
+        let key_id = full_key.strip_prefix(&prefix)?.to_owned();
+        let json = String::from_utf8(value).ok()?;
+        let mut store = self.store.clone();
+        store.delete(cf::DEVICE_OTK, &full_key);
+        Some((key_id, json))
     }
 
     fn device_keys_of(&self, user: &UserId) -> Vec<(String, String)> {
@@ -1696,7 +1718,7 @@ mod tests {
     }
 
     #[test]
-    fn device_keys_upload_query_and_otk_counts_round_trip() {
+    fn device_keys_upload_query_and_otk_claim_round_trip() {
         let s = server();
         let alice = UserId::parse("@alice:gaussian.tech").unwrap();
         s.store_device_keys(
@@ -1711,11 +1733,40 @@ mod tests {
         assert_eq!(devices[0].0, "DEV1");
         assert!(devices[0].1.contains("\"device_id\":\"DEV1\""));
 
-        // One-time-key counts accumulate per algorithm.
-        let totals = s.add_one_time_keys(&alice, "DEV1", &[("signed_curve25519".to_owned(), 20)]);
-        assert_eq!(totals, vec![("signed_curve25519".to_owned(), 20)]);
-        let totals = s.add_one_time_keys(&alice, "DEV1", &[("signed_curve25519".to_owned(), 5)]);
-        assert_eq!(totals, vec![("signed_curve25519".to_owned(), 25)]);
+        // Storing one-time keys reports the count per algorithm.
+        let totals = s.store_one_time_keys(
+            &alice,
+            "DEV1",
+            &[
+                (
+                    "signed_curve25519:AAAA".to_owned(),
+                    r#"{"key":"a"}"#.to_owned(),
+                ),
+                (
+                    "signed_curve25519:BBBB".to_owned(),
+                    r#"{"key":"b"}"#.to_owned(),
+                ),
+            ],
+        );
+        assert_eq!(totals, vec![("signed_curve25519".to_owned(), 2)]);
+
+        // Claiming draws one down (returning its material) and decrements the count.
+        let claimed = s
+            .claim_one_time_key(&alice, "DEV1", "signed_curve25519")
+            .unwrap();
+        assert!(claimed.0.starts_with("signed_curve25519:"));
+        assert!(claimed.1.contains("\"key\":"));
+        assert_eq!(
+            s.one_time_key_counts(&alice, "DEV1"),
+            vec![("signed_curve25519".to_owned(), 1)]
+        );
+        // The second claim empties the device; a third returns nothing.
+        assert!(s
+            .claim_one_time_key(&alice, "DEV1", "signed_curve25519")
+            .is_some());
+        assert!(s
+            .claim_one_time_key(&alice, "DEV1", "signed_curve25519")
+            .is_none());
 
         // A different user's devices are not returned.
         let bob = UserId::parse("@bob:gaussian.tech").unwrap();
