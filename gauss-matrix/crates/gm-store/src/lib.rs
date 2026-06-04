@@ -77,8 +77,10 @@ pub mod cf {
     /// Published E2EE device keys (§VI.B): `{user}\u{1f}{device_id}` → the
     /// opaque `device_keys` JSON, relayed verbatim (never decrypted).
     pub const DEVICE_KEYS: &str = "device_keys";
-    /// One-time-key counts per device and algorithm (§VI.B):
-    /// `{user}\u{1f}{device_id}\u{1f}{algorithm}` → remaining count.
+    /// Stored one-time keys per device (§VI.B):
+    /// `{user}\u{1f}{device_id}\u{1f}{key_id}` → the opaque key JSON, where
+    /// `key_id` is `algorithm:id`. `keys/claim` removes one; remaining counts
+    /// per algorithm are derived by scanning this family.
     pub const DEVICE_OTK: &str = "device_otk";
 }
 

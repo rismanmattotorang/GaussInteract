@@ -48,8 +48,8 @@
 //!   `{"pdus":[…],"auth_chain":[…]}`;
 //! - `GET /_matrix/federation/v1/backfill/{roomId}` → historical events at or
 //!   before the `v` events as `{"pdus":[…]}`;
-//! - `POST /_matrix/client/v3/keys/{upload,query}` → upload/query E2EE device
-//!   keys and one-time-key counts;
+//! - `POST /_matrix/client/v3/keys/{upload,query,claim}` → upload/query E2EE
+//!   device keys and one-time-key counts, and claim a one-time key;
 //! - `GET /_matrix/federation/v1/user/devices/{userId}` → a user's device list
 //!   for a peer;
 //! - `GET /_matrix/key/v2/server` → this server's published signing keys
@@ -317,6 +317,7 @@ impl<H: Homeserver> Ingress<H> {
             (Method::Post, "/_matrix/client/v3/createRoom") => self.serve_create_room(user, req),
             (Method::Post, "/_matrix/client/v3/keys/upload") => self.serve_keys_upload(user, req),
             (Method::Post, "/_matrix/client/v3/keys/query") => self.serve_keys_query(req),
+            (Method::Post, "/_matrix/client/v3/keys/claim") => self.serve_keys_claim(req),
             (Method::Get, "/_matrix/client/v3/sync") => self.serve_sync(user, req),
             (Method::Get, "/_matrix/key/v2/server") => {
                 // Public: publish this server's signing keys for fetch + cache.
@@ -764,16 +765,14 @@ impl<H: Homeserver> Ingress<H> {
             self.server
                 .store_device_keys(user, &device_id, &device_keys.to_string());
         }
-        // Count uploaded one-time keys per algorithm (the part before ':').
-        let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+        // Store the uploaded one-time keys (key_id → opaque key JSON).
+        let mut keys: Vec<(String, String)> = Vec::new();
         if let Some(Json::Object(otk)) = body.get("one_time_keys") {
-            for key_id in otk.keys() {
-                let alg = key_id.split(':').next().unwrap_or(key_id);
-                *counts.entry(alg.to_owned()).or_insert(0) += 1;
+            for (key_id, value) in otk {
+                keys.push((key_id.clone(), value.to_string()));
             }
         }
-        let counts: Vec<(String, u32)> = counts.into_iter().collect();
-        let totals = self.server.add_one_time_keys(user, &device_id, &counts);
+        let totals = self.server.store_one_time_keys(user, &device_id, &keys);
         let mut obj = BTreeMap::new();
         obj.insert(
             "one_time_key_counts".to_owned(),
@@ -813,6 +812,50 @@ impl<H: Homeserver> Ingress<H> {
         }
         let mut obj = BTreeMap::new();
         obj.insert("device_keys".to_owned(), Json::Object(device_keys));
+        Response::json_ok(Json::Object(obj).to_string())
+    }
+
+    /// `POST /_matrix/client/v3/keys/claim`: draw down one one-time key per
+    /// requested `(user, device, algorithm)` from
+    /// `{"one_time_keys":{user:{device:algorithm}}}`, returning the claimed keys
+    /// as `{"one_time_keys":{user:{device:{key_id:<key>}}}}`. A device with no
+    /// key left for the algorithm is simply omitted.
+    fn serve_keys_claim(&self, req: &Request<'_>) -> Response {
+        let Ok(Json::Object(body)) = Json::parse(req.body.unwrap_or("{}")) else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_BAD_JSON", "body must be an object"),
+            );
+        };
+        let mut claimed = BTreeMap::new();
+        if let Some(Json::Object(requested)) = body.get("one_time_keys") {
+            for (user_id, devices) in requested {
+                let (Ok(user), Json::Object(devices)) = (UserId::parse(user_id.clone()), devices)
+                else {
+                    continue;
+                };
+                let mut by_device = BTreeMap::new();
+                for (device, algorithm) in devices {
+                    let Some(algorithm) = algorithm.as_str() else {
+                        continue;
+                    };
+                    if let Some((key_id, key_json)) =
+                        self.server.claim_one_time_key(&user, device, algorithm)
+                    {
+                        if let Ok(key) = Json::parse(&key_json) {
+                            let mut one = BTreeMap::new();
+                            one.insert(key_id, key);
+                            by_device.insert(device.clone(), Json::Object(one));
+                        }
+                    }
+                }
+                if !by_device.is_empty() {
+                    claimed.insert(user_id.clone(), Json::Object(by_device));
+                }
+            }
+        }
+        let mut obj = BTreeMap::new();
+        obj.insert("one_time_keys".to_owned(), Json::Object(claimed));
         Response::json_ok(Json::Object(obj).to_string())
     }
 
@@ -1421,14 +1464,31 @@ mod tests {
     }
     impl DeviceKeyStore for TestServer {
         fn store_device_keys(&self, _user: &UserId, _device_id: &str, _json: &str) {}
-        fn add_one_time_keys(
+        fn store_one_time_keys(
             &self,
             _user: &UserId,
             _device_id: &str,
-            counts: &[(String, u32)],
+            keys: &[(String, String)],
         ) -> Vec<(String, u32)> {
-            // Echo back what was offered, so the upload response is observable.
-            counts.to_vec()
+            // Count the offered keys per algorithm, so the response is observable.
+            let mut counts = std::collections::BTreeMap::new();
+            for (key_id, _) in keys {
+                let alg = key_id.split(':').next().unwrap_or(key_id);
+                *counts.entry(alg.to_owned()).or_insert(0u32) += 1;
+            }
+            counts.into_iter().collect()
+        }
+        fn claim_one_time_key(
+            &self,
+            _user: &UserId,
+            _device_id: &str,
+            algorithm: &str,
+        ) -> Option<(String, String)> {
+            // The double always has one key of the requested algorithm.
+            Some((
+                format!("{algorithm}:AAAA"),
+                r#"{"key":"base64otk"}"#.to_owned(),
+            ))
         }
         fn device_keys_of(&self, _user: &UserId) -> Vec<(String, String)> {
             // One fixed device with minimal keys, so query/devices are observable.
@@ -2467,6 +2527,24 @@ mod tests {
             .and_then(Json::as_str)
             .map(str::to_owned);
         assert_eq!(dev.as_deref(), Some("DEV1"));
+    }
+
+    #[test]
+    fn keys_claim_returns_a_claimed_one_time_key() {
+        let req = Request::new(Method::Post, "/_matrix/client/v3/keys/claim")
+            .with_authorization("Bearer tok123")
+            .with_body(r#"{"one_time_keys":{"@bob:gaussian.tech":{"DEV1":"signed_curve25519"}}}"#);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 200);
+        let dev = Json::parse(&resp.body)
+            .unwrap()
+            .get("one_time_keys")
+            .and_then(|o| o.get("@bob:gaussian.tech"))
+            .and_then(|u| u.get("DEV1"))
+            .and_then(|d| d.as_object().map(|m| m.keys().next().cloned()))
+            .flatten();
+        // The claimed key is keyed by its `algorithm:id` key id.
+        assert_eq!(dev.as_deref(), Some("signed_curve25519:AAAA"));
     }
 
     #[test]

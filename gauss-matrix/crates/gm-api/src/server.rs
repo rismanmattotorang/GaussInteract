@@ -133,14 +133,24 @@ pub trait DeviceKeyStore {
     /// Store a device's published `device_keys` JSON under `(user, device_id)`.
     fn store_device_keys(&self, user: &UserId, device_id: &str, device_keys_json: &str);
 
-    /// Add `counts` (per one-time-key algorithm) to a device's stored totals,
-    /// returning the new totals for every algorithm the device has.
-    fn add_one_time_keys(
+    /// Store uploaded one-time keys for a device — each `(key_id, key_json)`
+    /// where `key_id` is `algorithm:id` — returning the resulting count per
+    /// algorithm (what `keys/upload` echoes back).
+    fn store_one_time_keys(
         &self,
         user: &UserId,
         device_id: &str,
-        counts: &[(String, u32)],
+        keys: &[(String, String)],
     ) -> Vec<(String, u32)>;
+
+    /// Claim (remove and return) one stored one-time key of `algorithm` for a
+    /// device, as `(key_id, key_json)`, or `None` if the device has none left.
+    fn claim_one_time_key(
+        &self,
+        user: &UserId,
+        device_id: &str,
+        algorithm: &str,
+    ) -> Option<(String, String)>;
 
     /// The stored `(device_id, device_keys_json)` for each of `user`'s devices.
     fn device_keys_of(&self, user: &UserId) -> Vec<(String, String)>;
@@ -420,13 +430,22 @@ impl Backfill for NoServer {
 impl DeviceKeyStore for NoServer {
     fn store_device_keys(&self, _user: &UserId, _device_id: &str, _device_keys_json: &str) {}
 
-    fn add_one_time_keys(
+    fn store_one_time_keys(
         &self,
         _user: &UserId,
         _device_id: &str,
-        _counts: &[(String, u32)],
+        _keys: &[(String, String)],
     ) -> Vec<(String, u32)> {
         Vec::new()
+    }
+
+    fn claim_one_time_key(
+        &self,
+        _user: &UserId,
+        _device_id: &str,
+        _algorithm: &str,
+    ) -> Option<(String, String)> {
+        None
     }
 
     fn device_keys_of(&self, _user: &UserId) -> Vec<(String, String)> {
