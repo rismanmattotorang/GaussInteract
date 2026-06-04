@@ -19,7 +19,9 @@
 #![deny(rust_2018_idioms)]
 
 pub mod auth;
-pub mod ed25519;
+/// The Ed25519 signature primitive (re-exported from `gm-util`, where it now
+/// lives so state-resolution and the ingress can share it).
+pub use gm_util::ed25519;
 
 use gm_api::{Json, Pdu};
 use std::collections::BTreeMap;

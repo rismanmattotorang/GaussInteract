@@ -196,12 +196,12 @@ fn check_member_auth(event: &Pdu, view: &AuthView<'_>) -> Result<(), AuthError> 
                 return Err(AuthError::MembershipForbidden);
             }
             // An invite redeeming a third-party-invite token is allowed without
-            // the invite power: the matching `m.room.third_party_invite` was
-            // itself issued by a powered member.
-            if let Some(token) = third_party_invite_token(event) {
-                if view.has_third_party_invite(&token) {
-                    return Ok(());
-                }
+            // the invite power — but only if its `signed` block carries a valid
+            // signature by the public key the matching
+            // `m.room.third_party_invite` advertised (that event was itself
+            // issued by a powered member).
+            if third_party_invite_is_valid(event, view) {
+                return Ok(());
             }
             if view.power_level(sender) < view.invite_level() {
                 return Err(AuthError::InsufficientPower);
@@ -268,16 +268,51 @@ fn restricted_join_authorised(event: &Pdu, view: &AuthView<'_>) -> bool {
         && view.power_level(&authoriser) >= view.invite_level()
 }
 
-/// The third-party-invite token an `m.room.member` invite redeems, read from
-/// `content.third_party_invite.signed.token`, if present.
-fn third_party_invite_token(event: &Pdu) -> Option<String> {
-    Json::parse(&event.content_json)
-        .ok()?
-        .get("third_party_invite")
-        .and_then(|t| t.get("signed"))
-        .and_then(|s| s.get("token"))
-        .and_then(Json::as_str)
-        .map(str::to_owned)
+/// Whether an `m.room.member` invite validly redeems a third-party invite: its
+/// `content.third_party_invite.signed` block names a `token` for which the room
+/// holds a matching `m.room.third_party_invite`, and a signature over the
+/// canonical (signatures-free) `signed` object verifies against that event's
+/// advertised `public_key` (Ed25519). The signature check is what stops anyone
+/// forging an invite for an unrelated token.
+fn third_party_invite_is_valid(event: &Pdu, view: &AuthView<'_>) -> bool {
+    let Some(signed) = Json::parse(&event.content_json).ok().and_then(|c| {
+        c.get("third_party_invite")
+            .and_then(|t| t.get("signed"))
+            .cloned()
+    }) else {
+        return false;
+    };
+    let Some(token) = signed.get("token").and_then(Json::as_str) else {
+        return false;
+    };
+    let Some(public_key) = view.third_party_public_key(token) else {
+        return false; // no matching m.room.third_party_invite
+    };
+
+    // The signing bytes are the `signed` object with its `signatures` removed.
+    let mut unsigned = signed.clone();
+    let signatures = signed.get("signatures").and_then(Json::as_object).cloned();
+    if let Json::Object(map) = &mut unsigned {
+        map.remove("signatures");
+    }
+    let bytes = unsigned.to_string();
+
+    // Accept if any provided signature verifies under the advertised key.
+    let Some(signatures) = signatures else {
+        return false;
+    };
+    signatures.values().any(|by_key| {
+        by_key
+            .as_object()
+            .map(|keys| {
+                keys.values().any(|sig| {
+                    sig.as_str().is_some_and(|s| {
+                        gm_util::ed25519::verify_b64(bytes.as_bytes(), s, public_key)
+                    })
+                })
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// A read-only view of the room's current state for the auth checks.
@@ -286,7 +321,8 @@ struct AuthView<'a> {
     power_levels: Option<Json>,
     join_rules: Option<Json>,
     members: Vec<(&'a str, String)>, // (user, membership)
-    third_party_tokens: Vec<String>, // outstanding m.room.third_party_invite tokens
+    // outstanding m.room.third_party_invite: (token, advertised public_key)
+    third_party_invites: Vec<(String, String)>,
 }
 
 impl<'a> AuthView<'a> {
@@ -295,7 +331,7 @@ impl<'a> AuthView<'a> {
         let mut power_levels = None;
         let mut join_rules = None;
         let mut members = Vec::new();
-        let mut third_party_tokens = Vec::new();
+        let mut third_party_invites = Vec::new();
         for pdu in state {
             match pdu.kind.as_str() {
                 events::ROOM_CREATE => create = Some(pdu),
@@ -303,7 +339,15 @@ impl<'a> AuthView<'a> {
                 events::ROOM_JOIN_RULES => join_rules = Json::parse(&pdu.content_json).ok(),
                 events::ROOM_THIRD_PARTY_INVITE => {
                     if let Some(token) = pdu.state_key.as_deref() {
-                        third_party_tokens.push(token.to_owned());
+                        let public_key = Json::parse(&pdu.content_json)
+                            .ok()
+                            .and_then(|c| {
+                                c.get("public_key")
+                                    .and_then(Json::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .unwrap_or_default();
+                        third_party_invites.push((token.to_owned(), public_key));
                     }
                 }
                 events::ROOM_MEMBER => {
@@ -327,13 +371,17 @@ impl<'a> AuthView<'a> {
             power_levels,
             join_rules,
             members,
-            third_party_tokens,
+            third_party_invites,
         }
     }
 
-    /// Whether an outstanding `m.room.third_party_invite` with this token exists.
-    fn has_third_party_invite(&self, token: &str) -> bool {
-        self.third_party_tokens.iter().any(|t| t == token)
+    /// The public key advertised by an outstanding `m.room.third_party_invite`
+    /// with this token, if one exists.
+    fn third_party_public_key(&self, token: &str) -> Option<&str> {
+        self.third_party_invites
+            .iter()
+            .find(|(t, _)| t == token)
+            .map(|(_, key)| key.as_str())
     }
 
     /// The power required for an event of `kind`: a `power_levels.events`
@@ -1026,12 +1074,15 @@ mod tests {
     }
 
     #[test]
-    fn third_party_invite_token_admits_an_invite() {
-        // An invite redeeming a matching third-party token is allowed even when
-        // the sender lacks invite power; an unmatched token is not.
+    fn third_party_invite_with_a_valid_signature_admits_an_invite() {
+        // The identity server's keypair; its public key is advertised in the
+        // m.room.third_party_invite, and it signs the `signed` block.
+        let seed = gm_util::ed25519::seed_from_material("identity-server");
+        let public = gm_util::ed25519::public_key_b64(&seed).unwrap();
+
+        // Carol is joined but lacks invite power (level raised to 50), so only
+        // the third-party path can admit dave.
         let mut state = ops_room_state();
-        // Carol is joined but powerless (users_default 0, invite level 0 → so
-        // raise the invite level so the power path would otherwise fail).
         state.retain(|p| p.kind != events::ROOM_POWER_LEVELS);
         state.push(pdu(
             events::ROOM_POWER_LEVELS,
@@ -1049,26 +1100,53 @@ mod tests {
             events::ROOM_THIRD_PARTY_INVITE,
             "@alice:gaussian.tech",
             Some("tok-123"),
-            r#"{"display_name":"friend"}"#,
+            &format!(r#"{{"public_key":"{public}"}}"#),
         ));
 
-        let invite_with_token = pdu(
+        // Sign the canonical (signatures-free) `signed` object: {mxid, token}.
+        let signing_bytes =
+            gm_api::Json::parse(r#"{"mxid":"@dave:gaussian.tech","token":"tok-123"}"#)
+                .unwrap()
+                .to_string();
+        let sig = gm_util::ed25519::sign_b64(signing_bytes.as_bytes(), &seed);
+        let invite = pdu(
             events::ROOM_MEMBER,
             "@carol:gaussian.tech",
             Some("@dave:gaussian.tech"),
-            r#"{"membership":"invite","third_party_invite":{"signed":{"token":"tok-123"}}}"#,
+            &format!(
+                r#"{{"membership":"invite","third_party_invite":{{"signed":{{"mxid":"@dave:gaussian.tech","token":"tok-123","signatures":{{"identity-server":{{"ed25519:0":"{sig}"}}}}}}}}}}"#
+            ),
         );
-        assert_eq!(check_auth(&invite_with_token, &state), Ok(()));
+        assert_eq!(check_auth(&invite, &state), Ok(()));
 
-        // The same invite without a matching token fails on invite power.
-        let invite_bad_token = pdu(
+        // A forged signature (wrong key) does not verify -> falls back to the
+        // (failing) invite-power check.
+        let forged_sig = gm_util::ed25519::sign_b64(
+            signing_bytes.as_bytes(),
+            &gm_util::ed25519::seed_from_material("impostor"),
+        );
+        let forged = pdu(
             events::ROOM_MEMBER,
             "@carol:gaussian.tech",
             Some("@dave:gaussian.tech"),
-            r#"{"membership":"invite","third_party_invite":{"signed":{"token":"nope"}}}"#,
+            &format!(
+                r#"{{"membership":"invite","third_party_invite":{{"signed":{{"mxid":"@dave:gaussian.tech","token":"tok-123","signatures":{{"identity-server":{{"ed25519:0":"{forged_sig}"}}}}}}}}}}"#
+            ),
         );
         assert_eq!(
-            check_auth(&invite_bad_token, &state),
+            check_auth(&forged, &state),
+            Err(AuthError::InsufficientPower)
+        );
+
+        // An unknown token (no matching third_party_invite) also falls back.
+        let unknown = pdu(
+            events::ROOM_MEMBER,
+            "@carol:gaussian.tech",
+            Some("@dave:gaussian.tech"),
+            r#"{"membership":"invite","third_party_invite":{"signed":{"token":"nope","signatures":{}}}}"#,
+        );
+        assert_eq!(
+            check_auth(&unknown, &state),
             Err(AuthError::InsufficientPower)
         );
     }
