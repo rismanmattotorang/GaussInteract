@@ -796,9 +796,8 @@ impl<S: Store + Clone> MembershipChanger for GaussServer<S> {
             Some(tip) => (tip.depth + 1, vec![tip.event_id.clone()]),
             None => (1, Vec::new()),
         };
-        let event_id = mint_state_event_id(room, events::ROOM_MEMBER, depth);
-        let pdu = Pdu {
-            event_id: EventId::parse(event_id.clone()).ok()?,
+        let mut pdu = Pdu {
+            event_id: placeholder_event_id(),
             room_id: room.clone(),
             sender: actor.clone(),
             kind: events::ROOM_MEMBER.to_owned(),
@@ -809,6 +808,9 @@ impl<S: Store + Clone> MembershipChanger for GaussServer<S> {
             auth_events: Vec::new(),
             content_json: single_field("membership", membership),
         };
+        // The event id is the content-addressed reference hash of the event.
+        let event_id = pdu.reference_id();
+        pdu.event_id = EventId::parse(event_id.clone()).ok()?;
         // Authorize the transition against the join-rules / invite / power-level
         // state machine before accepting it.
         if gm_stateres::auth::check_auth(&pdu, &rooms.current_state_pdus(room)).is_err() {
@@ -858,9 +860,8 @@ impl<S: Store + Clone> RoomCreator for GaussServer<S> {
         let mut prev_events: Vec<EventId> = Vec::new();
         for (i, (kind, state_key, content)) in events.into_iter().enumerate() {
             let depth = i as u64 + 1;
-            let event_id = EventId::parse(mint_state_event_id(&room, kind, depth)).ok()?;
-            let pdu = Pdu {
-                event_id: event_id.clone(),
+            let mut pdu = Pdu {
+                event_id: placeholder_event_id(),
                 room_id: room.clone(),
                 sender: creator.clone(),
                 kind: kind.to_owned(),
@@ -871,6 +872,8 @@ impl<S: Store + Clone> RoomCreator for GaussServer<S> {
                 auth_events: Vec::new(),
                 content_json: content,
             };
+            let event_id = EventId::parse(pdu.reference_id()).ok()?;
+            pdu.event_id = event_id.clone();
             rooms.append(&pdu);
             prev_events = vec![event_id];
         }
@@ -918,9 +921,8 @@ impl<S: Store + Clone> MessageSender for GaussServer<S> {
             Some(tip) => (tip.depth + 1, vec![tip.event_id.clone()]),
             None => (1, Vec::new()),
         };
-        let event_id = mint_event_id(room, sender, txn_id, depth);
-        let pdu = Pdu {
-            event_id: EventId::parse(event_id.clone()).ok()?,
+        let mut pdu = Pdu {
+            event_id: placeholder_event_id(),
             room_id: room.clone(),
             sender: sender.clone(),
             kind: event_type.to_owned(),
@@ -931,6 +933,9 @@ impl<S: Store + Clone> MessageSender for GaussServer<S> {
             auth_events: Vec::new(),
             content_json: content.to_owned(),
         };
+        // The event id is the content-addressed reference hash of the event.
+        let event_id = pdu.reference_id();
+        pdu.event_id = EventId::parse(event_id.clone()).ok()?;
         // Authorize the event against current room state before accepting it: a
         // non-member (or insufficiently-powered sender) cannot send.
         if gm_stateres::auth::check_auth(&pdu, &rooms.current_state_pdus(room)).is_err() {
@@ -1046,25 +1051,10 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Derive a (scaffold, deterministic) event id for a send. Production derives
-/// the event id by hashing the event per the room version; this keeps the
-/// dependency-free placeholder consistent with the rest of the scaffold.
-fn mint_event_id(room: &RoomId, sender: &UserId, txn_id: &str, depth: u64) -> String {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    room.as_str().hash(&mut h);
-    sender.as_str().hash(&mut h);
-    txn_id.hash(&mut h);
-    depth.hash(&mut h);
-    format!("${:016x}", h.finish())
-}
-
-/// Derive a (scaffold) event id for a created room's initial state event.
-fn mint_state_event_id(room: &RoomId, kind: &str, depth: u64) -> String {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    room.as_str().hash(&mut h);
-    kind.hash(&mut h);
-    depth.hash(&mut h);
-    format!("${:016x}", h.finish())
+/// A throwaway event id used only while building a PDU, before its real
+/// content-addressed [`Pdu::reference_id`] is computed and assigned.
+fn placeholder_event_id() -> EventId {
+    EventId::parse("$pending").expect("valid placeholder id")
 }
 
 /// `m.room.create` content: the creator and the room version.
@@ -1900,6 +1890,42 @@ mod tests {
         // A different user's devices are not returned.
         let bob = UserId::parse("@bob:gaussian.tech").unwrap();
         assert!(s.device_keys_of(&bob).is_empty());
+    }
+
+    #[test]
+    fn sent_events_get_content_addressed_reference_ids() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+        let one = s
+            .send_message(
+                &alice,
+                &room,
+                events::ROOM_MESSAGE,
+                "t1",
+                r#"{"body":"one"}"#,
+            )
+            .unwrap();
+        let two = s
+            .send_message(
+                &alice,
+                &room,
+                events::ROOM_MESSAGE,
+                "t2",
+                r#"{"body":"two"}"#,
+            )
+            .unwrap();
+
+        // Reference-hash ids: `$` + base64url(SHA-256), and distinct per event.
+        assert!(one.starts_with('$') && one.len() > 16);
+        assert_ne!(one, two);
+        // The stored event's id equals its recomputed reference hash.
+        let pdu = s
+            .timeline(&room)
+            .into_iter()
+            .find(|p| p.event_id.as_str() == one)
+            .unwrap();
+        assert_eq!(pdu.reference_id(), one);
     }
 
     #[test]

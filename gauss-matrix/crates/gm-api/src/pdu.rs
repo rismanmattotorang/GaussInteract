@@ -53,6 +53,21 @@ impl Pdu {
             .map(|state_key| (self.kind.as_str(), state_key))
     }
 
+    /// The content-addressed **reference-hash event id** for this PDU
+    /// (room version 3+): `$` + URL-safe unpadded base64 of the SHA-256 of the
+    /// event's canonical JSON. The canonical form is [`Self::to_json`] without
+    /// the `event_id` (and, in production, without `signatures`/`unsigned`), so
+    /// the id is determined entirely by the event's content and DAG position.
+    pub fn reference_id(&self) -> String {
+        let mut obj = match self.to_json() {
+            Json::Object(map) => map,
+            _ => BTreeMap::new(),
+        };
+        obj.remove("event_id");
+        let canonical = Json::Object(obj).to_string();
+        gm_util::hashing::reference_id(canonical.as_bytes())
+    }
+
     /// Serialize this PDU to its Matrix JSON form (the shape federation sends and
     /// the event-storage / `/state` paths return). `content_json` is embedded as
     /// the parsed `content` object (an empty object if it does not parse).
@@ -203,6 +218,25 @@ mod tests {
             auth_events: Vec::new(),
             content_json: "{}".to_owned(),
         }
+    }
+
+    #[test]
+    fn reference_id_is_content_addressed_and_id_independent() {
+        let mut a = pdu(events::ROOM_MESSAGE, None);
+        a.content_json = r#"{"body":"one"}"#.to_owned();
+        let id = a.reference_id();
+        // A reference-hash id is `$` + URL-safe base64 of SHA-256, not the
+        // event's own (placeholder) id.
+        assert!(id.starts_with('$') && id.len() > 1);
+        assert_ne!(id, "$e1");
+        // It does not depend on the carried event_id …
+        let mut a2 = a.clone();
+        a2.event_id = EventId::parse("$different").unwrap();
+        assert_eq!(a.reference_id(), a2.reference_id());
+        // … but it does depend on the content.
+        let mut b = a.clone();
+        b.content_json = r#"{"body":"two"}"#.to_owned();
+        assert_ne!(a.reference_id(), b.reference_id());
     }
 
     #[test]

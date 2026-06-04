@@ -15,6 +15,7 @@
 
 pub mod ed25519;
 pub mod error;
+pub mod hashing;
 pub mod ids;
 
 pub use error::GmError;
