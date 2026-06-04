@@ -27,3 +27,6 @@ pub const ROOM_ENCRYPTION: &str = "m.room.encryption";
 pub const ROOM_ENCRYPTED: &str = "m.room.encrypted";
 /// `m.room.redaction` — redacts (strikes) another event.
 pub const ROOM_REDACTION: &str = "m.room.redaction";
+/// `m.room.third_party_invite` — a pending invite to a third-party identifier,
+/// keyed by an opaque token a later `m.room.member` invite redeems.
+pub const ROOM_THIRD_PARTY_INVITE: &str = "m.room.third_party_invite";

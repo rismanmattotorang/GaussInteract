@@ -17,16 +17,17 @@
 //!   (see [`check_auth`]): self-join into a `public` room, to accept an invite,
 //!   or into a `restricted`/`knock_restricted` room when a powered member has
 //!   authorised it (MSC3083); knocking when the room permits it; invite/kick/ban
-//!   by a sufficiently-powered member; leaving oneself;
-//! - a `m.room.redaction` requires the room's `redact` power level;
+//!   by a sufficiently-powered member; leaving oneself; an invite that redeems a
+//!   matching `m.room.third_party_invite` token;
+//! - a `m.room.redaction` is allowed when it targets an event from the
+//!   redactor's own server, otherwise it needs the room's `redact` power level;
 //! - any other sender must be **joined**, with sufficient **power level** for
-//!   the event — the `state_default` for state events, the `events_default` for
-//!   messages — read from `m.room.power_levels` (before which the room creator
-//!   has power 100 and everyone else 0).
+//!   the event — a `power_levels.events` per-type override if set, else the
+//!   `state_default` for state events / `events_default` for messages (before
+//!   `m.room.power_levels` the room creator has power 100 and everyone else 0).
 //!
-//! The remaining rules (third-party invites, per-event-type power overrides,
-//! redacting one's own event below the redact level) layer on top of this and
-//! are the next increment.
+//! The remaining rules (third-party-invite signature verification, full
+//! state-resolution v2 conflict handling) layer on top of this.
 
 use gm_api::{events, Json, Pdu};
 
@@ -94,19 +95,48 @@ pub fn check_auth(event: &Pdu, state: &[Pdu]) -> Result<(), AuthError> {
         return Err(AuthError::SenderNotJoined);
     }
 
-    // A redaction needs the room's redact power (it strikes another user's
-    // event); other state/message events use the state/events default.
-    let required = if event.kind == events::ROOM_REDACTION {
-        view.redact_level()
-    } else if event.is_state() {
-        view.state_default()
-    } else {
-        view.events_default()
-    };
+    // A redaction is allowed when the redactor redacts an event from their own
+    // server (matching domains), otherwise it needs the room's `redact` power.
+    if event.kind == events::ROOM_REDACTION {
+        if redaction_targets_own_domain(event) {
+            return Ok(());
+        }
+        return if view.power_level(sender) >= view.redact_level() {
+            Ok(())
+        } else {
+            Err(AuthError::InsufficientPower)
+        };
+    }
+
+    // Other events: a per-event-type override in `power_levels.events`, else the
+    // `state_default` / `events_default`.
+    let required = view.event_level(&event.kind, event.is_state());
     if view.power_level(sender) < required {
         return Err(AuthError::InsufficientPower);
     }
     Ok(())
+}
+
+/// Whether a redaction targets an event from the redactor's own server: the
+/// `redacts` event id carries a `:domain` matching the sender's domain (the
+/// "redact your own server's events" auth rule). Falls back to `false` (and thus
+/// the power check) when the id carries no domain.
+fn redaction_targets_own_domain(event: &Pdu) -> bool {
+    let Some(redacts) = Json::parse(&event.content_json)
+        .ok()
+        .and_then(|c| c.get("redacts").and_then(Json::as_str).map(str::to_owned))
+    else {
+        return false;
+    };
+    let Some((_, target_domain)) = redacts.split_once(':') else {
+        return false; // no domain component to match
+    };
+    event
+        .sender
+        .as_str()
+        .split_once(':')
+        .map(|(_, sender_domain)| sender_domain == target_domain)
+        .unwrap_or(false)
 }
 
 /// Authorize an `m.room.member` event against the membership state machine.
@@ -164,6 +194,14 @@ fn check_member_auth(event: &Pdu, view: &AuthView<'_>) -> Result<(), AuthError> 
             }
             if matches!(target_current, Some("join") | Some("ban")) {
                 return Err(AuthError::MembershipForbidden);
+            }
+            // An invite redeeming a third-party-invite token is allowed without
+            // the invite power: the matching `m.room.third_party_invite` was
+            // itself issued by a powered member.
+            if let Some(token) = third_party_invite_token(event) {
+                if view.has_third_party_invite(&token) {
+                    return Ok(());
+                }
             }
             if view.power_level(sender) < view.invite_level() {
                 return Err(AuthError::InsufficientPower);
@@ -230,12 +268,25 @@ fn restricted_join_authorised(event: &Pdu, view: &AuthView<'_>) -> bool {
         && view.power_level(&authoriser) >= view.invite_level()
 }
 
+/// The third-party-invite token an `m.room.member` invite redeems, read from
+/// `content.third_party_invite.signed.token`, if present.
+fn third_party_invite_token(event: &Pdu) -> Option<String> {
+    Json::parse(&event.content_json)
+        .ok()?
+        .get("third_party_invite")
+        .and_then(|t| t.get("signed"))
+        .and_then(|s| s.get("token"))
+        .and_then(Json::as_str)
+        .map(str::to_owned)
+}
+
 /// A read-only view of the room's current state for the auth checks.
 struct AuthView<'a> {
     create: Option<&'a Pdu>,
     power_levels: Option<Json>,
     join_rules: Option<Json>,
     members: Vec<(&'a str, String)>, // (user, membership)
+    third_party_tokens: Vec<String>, // outstanding m.room.third_party_invite tokens
 }
 
 impl<'a> AuthView<'a> {
@@ -244,11 +295,17 @@ impl<'a> AuthView<'a> {
         let mut power_levels = None;
         let mut join_rules = None;
         let mut members = Vec::new();
+        let mut third_party_tokens = Vec::new();
         for pdu in state {
             match pdu.kind.as_str() {
                 events::ROOM_CREATE => create = Some(pdu),
                 events::ROOM_POWER_LEVELS => power_levels = Json::parse(&pdu.content_json).ok(),
                 events::ROOM_JOIN_RULES => join_rules = Json::parse(&pdu.content_json).ok(),
+                events::ROOM_THIRD_PARTY_INVITE => {
+                    if let Some(token) = pdu.state_key.as_deref() {
+                        third_party_tokens.push(token.to_owned());
+                    }
+                }
                 events::ROOM_MEMBER => {
                     if let Some(user) = pdu.state_key.as_deref() {
                         if let Some(membership) =
@@ -270,6 +327,31 @@ impl<'a> AuthView<'a> {
             power_levels,
             join_rules,
             members,
+            third_party_tokens,
+        }
+    }
+
+    /// Whether an outstanding `m.room.third_party_invite` with this token exists.
+    fn has_third_party_invite(&self, token: &str) -> bool {
+        self.third_party_tokens.iter().any(|t| t == token)
+    }
+
+    /// The power required for an event of `kind`: a `power_levels.events`
+    /// override if present, else the state/events default.
+    fn event_level(&self, kind: &str, is_state: bool) -> i64 {
+        if let Some(level) = self
+            .power_levels
+            .as_ref()
+            .and_then(|pl| pl.get("events"))
+            .and_then(|e| e.get(kind))
+            .and_then(Json::as_i64)
+        {
+            return level;
+        }
+        if is_state {
+            self.state_default()
+        } else {
+            self.events_default()
         }
     }
 
@@ -883,6 +965,111 @@ mod tests {
         assert_eq!(
             check_auth(&by_stranger, &state),
             Err(AuthError::SenderNotJoined)
+        );
+    }
+
+    #[test]
+    fn a_member_may_redact_their_own_servers_event_without_redact_power() {
+        // Carol (joined, power 0 < redact 50) may still redact an event from her
+        // own server (matching domains), but not one from another server.
+        let mut state = ops_room_state();
+        state.push(pdu(
+            events::ROOM_MEMBER,
+            "@carol:gaussian.tech",
+            Some("@carol:gaussian.tech"),
+            r#"{"membership":"join"}"#,
+        ));
+        let own = pdu(
+            events::ROOM_REDACTION,
+            "@carol:gaussian.tech",
+            None,
+            r#"{"redacts":"$evt:gaussian.tech"}"#,
+        );
+        assert_eq!(check_auth(&own, &state), Ok(()));
+        let foreign = pdu(
+            events::ROOM_REDACTION,
+            "@carol:gaussian.tech",
+            None,
+            r#"{"redacts":"$evt:other.tld"}"#,
+        );
+        assert_eq!(
+            check_auth(&foreign, &state),
+            Err(AuthError::InsufficientPower)
+        );
+    }
+
+    #[test]
+    fn per_event_type_power_override_is_honoured() {
+        // A power_levels.events override raises the bar for one event type.
+        let mut state = ops_room_state();
+        state.retain(|p| p.kind != events::ROOM_POWER_LEVELS);
+        state.push(pdu(
+            events::ROOM_POWER_LEVELS,
+            "@alice:gaussian.tech",
+            Some(""),
+            r#"{"users":{"@alice:gaussian.tech":100,"@carol:gaussian.tech":40},
+                "users_default":0,"events":{"m.room.message":50}}"#,
+        ));
+        state.push(pdu(
+            events::ROOM_MEMBER,
+            "@carol:gaussian.tech",
+            Some("@carol:gaussian.tech"),
+            r#"{"membership":"join"}"#,
+        ));
+        let msg = |sender: &str| pdu(events::ROOM_MESSAGE, sender, None, r#"{"body":"hi"}"#);
+        // Carol (power 40) is below the 50 override; alice (100) is above it.
+        assert_eq!(
+            check_auth(&msg("@carol:gaussian.tech"), &state),
+            Err(AuthError::InsufficientPower)
+        );
+        assert_eq!(check_auth(&msg("@alice:gaussian.tech"), &state), Ok(()));
+    }
+
+    #[test]
+    fn third_party_invite_token_admits_an_invite() {
+        // An invite redeeming a matching third-party token is allowed even when
+        // the sender lacks invite power; an unmatched token is not.
+        let mut state = ops_room_state();
+        // Carol is joined but powerless (users_default 0, invite level 0 → so
+        // raise the invite level so the power path would otherwise fail).
+        state.retain(|p| p.kind != events::ROOM_POWER_LEVELS);
+        state.push(pdu(
+            events::ROOM_POWER_LEVELS,
+            "@alice:gaussian.tech",
+            Some(""),
+            r#"{"users":{"@alice:gaussian.tech":100},"users_default":0,"invite":50}"#,
+        ));
+        state.push(pdu(
+            events::ROOM_MEMBER,
+            "@carol:gaussian.tech",
+            Some("@carol:gaussian.tech"),
+            r#"{"membership":"join"}"#,
+        ));
+        state.push(pdu(
+            events::ROOM_THIRD_PARTY_INVITE,
+            "@alice:gaussian.tech",
+            Some("tok-123"),
+            r#"{"display_name":"friend"}"#,
+        ));
+
+        let invite_with_token = pdu(
+            events::ROOM_MEMBER,
+            "@carol:gaussian.tech",
+            Some("@dave:gaussian.tech"),
+            r#"{"membership":"invite","third_party_invite":{"signed":{"token":"tok-123"}}}"#,
+        );
+        assert_eq!(check_auth(&invite_with_token, &state), Ok(()));
+
+        // The same invite without a matching token fails on invite power.
+        let invite_bad_token = pdu(
+            events::ROOM_MEMBER,
+            "@carol:gaussian.tech",
+            Some("@dave:gaussian.tech"),
+            r#"{"membership":"invite","third_party_invite":{"signed":{"token":"nope"}}}"#,
+        );
+        assert_eq!(
+            check_auth(&invite_bad_token, &state),
+            Err(AuthError::InsufficientPower)
         );
     }
 }
