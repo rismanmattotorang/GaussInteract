@@ -485,6 +485,30 @@ impl<S: Store + Clone> FederationReceiver for GaussServer<S> {
                 };
                 results.insert(pdu.event_id.as_str().to_owned(), outcome);
             }
+
+            // Ephemeral EDUs: an `m.device_list_update` refreshes our cached
+            // copy of a remote user's device keys.
+            for edu in &transaction.edus {
+                if edu.edu_type != "m.device_list_update" {
+                    continue;
+                }
+                let Ok(content) = Json::parse(&edu.content_json) else {
+                    continue;
+                };
+                let (Some(user_id), Some(device_id)) = (
+                    content.get("user_id").and_then(Json::as_str),
+                    content.get("device_id").and_then(Json::as_str),
+                ) else {
+                    continue;
+                };
+                if let Ok(user) = UserId::parse(user_id) {
+                    let keys = content
+                        .get("keys")
+                        .map(|k| k.to_string())
+                        .unwrap_or_else(|| "{}".to_owned());
+                    self.store_device_keys(&user, device_id, &keys);
+                }
+            }
         }
         let mut obj = BTreeMap::new();
         obj.insert("pdus".to_owned(), Json::Object(results));
@@ -649,6 +673,24 @@ impl<S: Store + Clone> DeviceKeyStore for GaussServer<S> {
             .filter_map(|(k, v)| {
                 let device = k.strip_prefix(&prefix)?;
                 Some((device.to_owned(), String::from_utf8(v).ok()?))
+            })
+            .collect()
+    }
+
+    fn store_cross_signing_key(&self, user: &UserId, usage: &str, key_json: &str) {
+        let mut store = self.store.clone();
+        let key = format!("{}{TXN_SEP}{usage}", user.as_str());
+        store.put(cf::CROSS_SIGNING, &key, key_json.as_bytes());
+    }
+
+    fn cross_signing_keys_of(&self, user: &UserId) -> Vec<(String, String)> {
+        let prefix = format!("{}{TXN_SEP}", user.as_str());
+        self.store
+            .scan(cf::CROSS_SIGNING)
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let usage = k.strip_prefix(&prefix)?;
+                Some((usage.to_owned(), String::from_utf8(v).ok()?))
             })
             .collect()
     }
@@ -1715,6 +1757,42 @@ mod tests {
         depths.sort_unstable();
         depths.dedup();
         assert_eq!(depths.len(), 16);
+    }
+
+    #[test]
+    fn cross_signing_keys_round_trip() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        s.store_cross_signing_key(&alice, "master", r#"{"keys":{"ed25519:m":"M"}}"#);
+        s.store_cross_signing_key(&alice, "self_signing", r#"{"keys":{"ed25519:s":"S"}}"#);
+
+        let keys = s.cross_signing_keys_of(&alice);
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().any(|(u, _)| u == "master"));
+        assert!(keys.iter().any(|(u, _)| u == "self_signing"));
+        // Another user's keys are isolated.
+        let bob = UserId::parse("@bob:gaussian.tech").unwrap();
+        assert!(s.cross_signing_keys_of(&bob).is_empty());
+    }
+
+    #[test]
+    fn device_list_update_edu_refreshes_cached_device_keys() {
+        let s = server();
+        let bob = UserId::parse("@bob:other.tld").unwrap();
+        let mut txn = gm_fed::Transaction::new("other.tld", 1700);
+        txn.edus.push(gm_fed::Edu {
+            edu_type: "m.device_list_update".to_owned(),
+            content_json:
+                r#"{"user_id":"@bob:other.tld","device_id":"BOBDEV","keys":{"device_id":"BOBDEV","algorithms":["m.olm.v1"]}}"#
+                    .to_owned(),
+        });
+
+        s.receive_transaction(&txn.to_json());
+        // The federated device-list update was cached as bob's device keys.
+        let devices = s.device_keys_of(&bob);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].0, "BOBDEV");
+        assert!(devices[0].1.contains("\"device_id\":\"BOBDEV\""));
     }
 
     #[test]

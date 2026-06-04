@@ -154,6 +154,13 @@ pub trait DeviceKeyStore {
 
     /// The stored `(device_id, device_keys_json)` for each of `user`'s devices.
     fn device_keys_of(&self, user: &UserId) -> Vec<(String, String)>;
+
+    /// Store a user's cross-signing key for `usage` (`master` / `self_signing` /
+    /// `user_signing`) as opaque JSON, relayed verbatim.
+    fn store_cross_signing_key(&self, user: &UserId, usage: &str, key_json: &str);
+
+    /// The stored `(usage, key_json)` cross-signing keys for `user`.
+    fn cross_signing_keys_of(&self, user: &UserId) -> Vec<(String, String)>;
 }
 
 /// Receive an inbound federation transaction (the SS `PUT /send/{txnId}` path).
@@ -449,6 +456,12 @@ impl DeviceKeyStore for NoServer {
     }
 
     fn device_keys_of(&self, _user: &UserId) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    fn store_cross_signing_key(&self, _user: &UserId, _usage: &str, _key_json: &str) {}
+
+    fn cross_signing_keys_of(&self, _user: &UserId) -> Vec<(String, String)> {
         Vec::new()
     }
 }

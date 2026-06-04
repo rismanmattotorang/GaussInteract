@@ -82,6 +82,9 @@ pub mod cf {
     /// `key_id` is `algorithm:id`. `keys/claim` removes one; remaining counts
     /// per algorithm are derived by scanning this family.
     pub const DEVICE_OTK: &str = "device_otk";
+    /// Cross-signing keys per user (§VI.B): `{user}\u{1f}{usage}` → the opaque
+    /// key JSON, where `usage` is `master` / `self_signing` / `user_signing`.
+    pub const CROSS_SIGNING: &str = "cross_signing";
 }
 
 /// A backend-agnostic, column-family keyed store.

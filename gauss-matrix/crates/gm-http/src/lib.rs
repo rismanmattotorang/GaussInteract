@@ -182,6 +182,10 @@ static SURFACE: &[Endpoint] = &[
     Endpoint::cs(Method::Post, "/_matrix/client/v3/keys/upload"),
     Endpoint::cs(Method::Post, "/_matrix/client/v3/keys/query"),
     Endpoint::cs(Method::Post, "/_matrix/client/v3/keys/claim"),
+    Endpoint::cs(
+        Method::Post,
+        "/_matrix/client/v3/keys/device_signing/upload",
+    ),
     // Server–Server
     Endpoint::ss_public(Method::Get, "/_matrix/key/v2/server"),
     Endpoint::ss(Method::Put, "/_matrix/federation/v1/send/{txnId}"),
