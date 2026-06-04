@@ -15,14 +15,14 @@
 //!
 //! ## Signature scheme
 //!
-//! Signing is **Ed25519** (RFC 8032, see [`crate::ed25519`]): a server signs
+//! Signing is **Ed25519** (RFC 8032, see [`gm_util::ed25519`]): a server signs
 //! with its 32-byte secret seed and the verifier holds only the origin's
 //! 32-byte *public* key, fetched from `/_matrix/key/v2/server`. Keys and
 //! signatures cross the wire as **unpadded base64**, so [`sign`] takes a base64
 //! secret seed and [`verify`] takes a base64 public key.
 
-use crate::ed25519;
 use gm_api::Json;
+use gm_util::ed25519;
 use std::collections::BTreeMap;
 
 /// A parsed `X-Matrix` authorization header.
