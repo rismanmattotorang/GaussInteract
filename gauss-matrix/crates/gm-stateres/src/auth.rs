@@ -26,8 +26,10 @@
 //!   `state_default` for state events / `events_default` for messages (before
 //!   `m.room.power_levels` the room creator has power 100 and everyone else 0).
 //!
-//! The remaining rules (third-party-invite signature verification, full
-//! state-resolution v2 conflict handling) layer on top of this.
+//! The room **creator** is determined per room version: from version 11 the
+//! create event has no `creator` content field and the creator is its sender
+//! (MSC3820), so the create-time power baseline and the create-time membership
+//! rule follow the version.
 
 use gm_api::{events, Json, Pdu};
 
@@ -137,6 +139,20 @@ fn redaction_targets_own_domain(event: &Pdu) -> bool {
         .split_once(':')
         .map(|(_, sender_domain)| sender_domain == target_domain)
         .unwrap_or(false)
+}
+
+/// The room version declared by an `m.room.create` event's `room_version`
+/// content field (the spec default of `1` when absent or unrecognised).
+pub(crate) fn create_room_version(create: &Pdu) -> u8 {
+    Json::parse(&create.content_json)
+        .ok()
+        .and_then(|c| {
+            c.get("room_version")
+                .and_then(Json::as_str)
+                .map(str::to_owned)
+        })
+        .and_then(|v| v.parse::<u8>().ok())
+        .unwrap_or(1)
 }
 
 /// Authorize an `m.room.member` event against the membership state machine.
@@ -440,11 +456,18 @@ impl<'a> AuthView<'a> {
         self.level("redact", DEFAULT_REDACT_POWER)
     }
 
-    /// The room creator from the create event's content, if present.
+    /// The room creator, determined by room version: from room version 11 the
+    /// create event has no `creator` content field and the creator *is* the
+    /// create event's sender (MSC3820); earlier versions read `content.creator`.
     fn creator(&self) -> Option<String> {
-        self.create
-            .and_then(|c| Json::parse(&c.content_json).ok())
-            .and_then(|c| c.get("creator").and_then(Json::as_str).map(str::to_owned))
+        let create = self.create?;
+        if create_room_version(create) >= 11 {
+            Some(create.sender.as_str().to_owned())
+        } else {
+            Json::parse(&create.content_json)
+                .ok()
+                .and_then(|c| c.get("creator").and_then(Json::as_str).map(str::to_owned))
+        }
     }
 
     fn power_level(&self, user: &str) -> i64 {
@@ -794,6 +817,72 @@ mod tests {
             r#"{"name":"Ops"}"#,
         );
         assert_eq!(check_auth(&name, &state), Ok(()));
+    }
+
+    #[test]
+    fn room_version_11_takes_the_creator_from_the_create_sender() {
+        // A v11 create has no `creator` field; the creator is its sender.
+        let state = vec![
+            pdu(
+                events::ROOM_CREATE,
+                "@alice:gaussian.tech",
+                Some(""),
+                r#"{"room_version":"11"}"#,
+            ),
+            pdu(
+                events::ROOM_MEMBER,
+                "@alice:gaussian.tech",
+                Some("@alice:gaussian.tech"),
+                r#"{"membership":"join"}"#,
+            ),
+        ];
+        // Alice (the create sender) is treated as the powered creator and may
+        // set the name without a power_levels event.
+        let name = pdu(
+            events::ROOM_NAME,
+            "@alice:gaussian.tech",
+            Some(""),
+            r#"{"name":"Ops"}"#,
+        );
+        assert_eq!(check_auth(&name, &state), Ok(()));
+        // Someone else is not the creator and has no power.
+        let by_bob = pdu(
+            events::ROOM_NAME,
+            "@bob:gaussian.tech",
+            Some(""),
+            r#"{"name":"Hijack"}"#,
+        );
+        assert_eq!(check_auth(&by_bob, &state), Err(AuthError::SenderNotJoined));
+    }
+
+    #[test]
+    fn pre_v11_ignores_the_create_sender_and_uses_content_creator() {
+        // In room version 10 the `creator` content field is authoritative, so a
+        // create whose sender differs still names @alice the creator.
+        let mut create = pdu(
+            events::ROOM_CREATE,
+            "@server:gaussian.tech",
+            Some(""),
+            r#"{"creator":"@alice:gaussian.tech","room_version":"10"}"#,
+        );
+        create.sender = UserId::parse("@server:gaussian.tech").unwrap();
+        let state = vec![
+            create,
+            pdu(
+                events::ROOM_MEMBER,
+                "@alice:gaussian.tech",
+                Some("@alice:gaussian.tech"),
+                r#"{"membership":"join"}"#,
+            ),
+        ];
+        // @alice (content.creator) is powered; the create's sender is not.
+        let by_alice = pdu(
+            events::ROOM_NAME,
+            "@alice:gaussian.tech",
+            Some(""),
+            r#"{"name":"Ops"}"#,
+        );
+        assert_eq!(check_auth(&by_alice, &state), Ok(()));
     }
 
     // Build a PDU with a specific id and auth_events for the chain tests.

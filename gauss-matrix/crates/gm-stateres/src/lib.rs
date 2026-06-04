@@ -226,12 +226,21 @@ fn sender_power(sender: &str, base: &StateMap, pdus: &HashMap<EventId, Pdu>) -> 
         }
         return pl.get("users_default").and_then(Json::as_i64).unwrap_or(0);
     }
-    // No power_levels: the creator is all-powerful, everyone else 0.
+    // No power_levels: the creator is all-powerful, everyone else 0. The creator
+    // is version-specific (from room version 11 it is the create event's sender,
+    // not a `content.creator` field).
     let creator = base
         .get(&(events::ROOM_CREATE.to_owned(), String::new()))
         .and_then(|id| pdus.get(id))
-        .and_then(|p| Json::parse(&p.content_json).ok())
-        .and_then(|c| c.get("creator").and_then(Json::as_str).map(str::to_owned));
+        .and_then(|create| {
+            if auth::create_room_version(create) >= 11 {
+                Some(create.sender.as_str().to_owned())
+            } else {
+                Json::parse(&create.content_json)
+                    .ok()
+                    .and_then(|c| c.get("creator").and_then(Json::as_str).map(str::to_owned))
+            }
+        });
     if creator.as_deref() == Some(sender) {
         100
     } else {
