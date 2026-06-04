@@ -17,10 +17,10 @@
 use crate::{AccountStore, RoomService, SessionStore};
 use gm_api::events;
 use gm_api::{
-    Backfill, DeviceKeyStore, FederationAuth, FederationReceiver, JoinedRoom, Json, Login,
-    LoginGrant, MembershipChanger, MessageSender, Pdu, PresenceStore, ReceiptSetter, RoomCreator,
-    RoomReader, RoomTimeline, RoomVersion, ServerKeys, SyncProvider, SyncView, TokenAuthority,
-    TypingNotifier,
+    Backfill, DeviceKeyStore, FederationAuth, FederationRead, FederationReceiver, JoinedRoom, Json,
+    Login, LoginGrant, MembershipChanger, MessageSender, Pdu, PresenceStore, ReceiptSetter,
+    RoomCreator, RoomReader, RoomTimeline, RoomVersion, ServerKeys, SyncProvider, SyncView,
+    TokenAuthority, TypingNotifier,
 };
 use gm_fed::{auth as fed_auth, Transaction};
 use gm_store::{cf, Store};
@@ -617,6 +617,57 @@ impl<S: Store + Clone> Backfill for GaussServer<S> {
         collected.sort_by(|a, b| b.depth.cmp(&a.depth));
         collected.truncate(limit);
         collected
+    }
+}
+
+impl<S: Store + Clone> FederationRead for GaussServer<S> {
+    fn event_transaction(&self, event_id: &str) -> Option<Json> {
+        let rooms = RoomService::new(self.store.clone());
+        // Find the event anywhere in this server's history (the global stream).
+        let pdu = rooms
+            .events_since(0)
+            .into_iter()
+            .find(|p| p.event_id.as_str() == event_id)?;
+        let mut obj = BTreeMap::new();
+        obj.insert("origin".to_owned(), Json::String(self.server_name.clone()));
+        obj.insert("origin_server_ts".to_owned(), Json::Number(now_ms() as f64));
+        obj.insert("pdus".to_owned(), Json::Array(vec![pdu.to_json()]));
+        Some(Json::Object(obj))
+    }
+
+    fn state_ids(&self, room: &RoomId) -> Json {
+        let rooms = RoomService::new(self.store.clone());
+        let state = rooms.current_state_pdus(room);
+        let pdu_ids: Vec<EventId> = state.iter().map(|p| p.event_id.clone()).collect();
+
+        // The auth chain is the transitive closure of the state events'
+        // auth_events, resolved over the room's timeline.
+        let by_id: std::collections::HashMap<EventId, Pdu> = rooms
+            .timeline(room)
+            .into_iter()
+            .map(|p| (p.event_id.clone(), p))
+            .collect();
+        let mut auth_chain: Vec<String> = gm_stateres::auth::auth_chain(&pdu_ids, &by_id)
+            .into_iter()
+            .map(|id| id.as_str().to_owned())
+            .collect();
+        auth_chain.sort();
+
+        let mut obj = BTreeMap::new();
+        obj.insert(
+            "pdu_ids".to_owned(),
+            Json::Array(
+                pdu_ids
+                    .iter()
+                    .map(|id| Json::String(id.as_str().to_owned()))
+                    .collect(),
+            ),
+        );
+        obj.insert(
+            "auth_chain_ids".to_owned(),
+            Json::Array(auth_chain.into_iter().map(Json::String).collect()),
+        );
+        Json::Object(obj)
     }
 }
 
@@ -1849,6 +1900,46 @@ mod tests {
         // A different user's devices are not returned.
         let bob = UserId::parse("@bob:gaussian.tech").unwrap();
         assert!(s.device_keys_of(&bob).is_empty());
+    }
+
+    #[test]
+    fn federation_event_and_state_ids_reads() {
+        let s = server();
+        let alice = UserId::parse("@alice:gaussian.tech").unwrap();
+        let room = s.create_room(&alice, Some("Ops"), None).unwrap();
+        let msg = s
+            .send_message(
+                &alice,
+                &room,
+                events::ROOM_MESSAGE,
+                "t1",
+                r#"{"body":"hi"}"#,
+            )
+            .unwrap();
+
+        // event_transaction wraps the event as a one-PDU transaction from us.
+        let txn = s.event_transaction(&msg).unwrap();
+        assert_eq!(
+            txn.get("origin").and_then(Json::as_str),
+            Some("gaussian.tech")
+        );
+        let pdus = txn.get("pdus").and_then(Json::as_array).unwrap();
+        assert_eq!(pdus.len(), 1);
+        assert_eq!(
+            pdus[0].get("event_id").and_then(Json::as_str),
+            Some(msg.as_str())
+        );
+        // An unknown event id yields nothing.
+        assert!(s.event_transaction("$nope").is_none());
+
+        // state_ids lists the current state's event ids (create, member,
+        // power_levels, name) and a (non-empty) auth-chain id set.
+        let ids = s.state_ids(&room);
+        let pdu_ids = ids.get("pdu_ids").and_then(Json::as_array).unwrap();
+        assert!(pdu_ids.len() >= 4);
+        assert!(ids.get("auth_chain_ids").and_then(Json::as_array).is_some());
+        // The message (not a state event) is not part of the state ids.
+        assert!(!pdu_ids.iter().any(|id| id.as_str() == Some(msg.as_str())));
     }
 
     #[test]

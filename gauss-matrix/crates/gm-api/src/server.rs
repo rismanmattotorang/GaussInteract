@@ -122,6 +122,19 @@ pub trait Backfill {
     fn backfill(&self, room: &RoomId, from: &[String], limit: usize) -> Vec<Pdu>;
 }
 
+/// Federation reads of a single event and of a room's state-event identifiers
+/// (the SS `GET /event/{eventId}` and `/state_ids/{roomId}` paths).
+pub trait FederationRead {
+    /// The event with `event_id`, wrapped as a transaction
+    /// `{"origin":…,"origin_server_ts":…,"pdus":[event]}`, or `None` if unknown.
+    fn event_transaction(&self, event_id: &str) -> Option<crate::Json>;
+
+    /// A room's current state and auth-chain event ids as
+    /// `{"pdu_ids":[…],"auth_chain_ids":[…]}` (the lighter counterpart of the
+    /// full-PDU `/state` path).
+    fn state_ids(&self, room: &RoomId) -> crate::Json;
+}
+
 /// Relay E2EE device keys and one-time-key counts (the CS `keys/upload` and
 /// `keys/query` paths, and the SS `user/devices/{userId}` path; spec §VI.B).
 ///
@@ -337,6 +350,7 @@ pub trait Homeserver:
     + FederationAuth
     + ServerKeys
     + Backfill
+    + FederationRead
     + DeviceKeyStore
 {
 }
@@ -357,6 +371,7 @@ impl<T> Homeserver for T where
         + FederationAuth
         + ServerKeys
         + Backfill
+        + FederationRead
         + DeviceKeyStore
 {
 }
@@ -431,6 +446,19 @@ impl FederationReceiver for NoServer {
 impl Backfill for NoServer {
     fn backfill(&self, _room: &RoomId, _from: &[String], _limit: usize) -> Vec<Pdu> {
         Vec::new()
+    }
+}
+
+impl FederationRead for NoServer {
+    fn event_transaction(&self, _event_id: &str) -> Option<crate::Json> {
+        None
+    }
+
+    fn state_ids(&self, _room: &RoomId) -> crate::Json {
+        let mut obj = std::collections::BTreeMap::new();
+        obj.insert("pdu_ids".to_owned(), crate::Json::Array(Vec::new()));
+        obj.insert("auth_chain_ids".to_owned(), crate::Json::Array(Vec::new()));
+        crate::Json::Object(obj)
     }
 }
 

@@ -46,6 +46,8 @@
 //!   transaction (PDUs/EDUs), returning the per-PDU acknowledgement;
 //! - `GET /_matrix/federation/v1/state/{roomId}` → the room's current state as
 //!   `{"pdus":[…],"auth_chain":[…]}`;
+//! - `GET /_matrix/federation/v1/state_ids/{roomId}` → the state and auth-chain
+//!   event ids; `GET /_matrix/federation/v1/event/{eventId}` → one event;
 //! - `GET /_matrix/federation/v1/backfill/{roomId}` → historical events at or
 //!   before the `v` events as `{"pdus":[…]}`;
 //! - `POST /_matrix/client/v3/keys/{upload,query,claim}` → upload/query E2EE
@@ -333,6 +335,12 @@ impl<H: Homeserver> Ingress<H> {
             (Method::Put, "/_matrix/federation/v1/send/{txnId}") => self.serve_federation_send(req),
             (Method::Get, "/_matrix/federation/v1/state/{roomId}") => {
                 self.serve_federation_state(m)
+            }
+            (Method::Get, "/_matrix/federation/v1/state_ids/{roomId}") => {
+                self.serve_federation_state_ids(m)
+            }
+            (Method::Get, "/_matrix/federation/v1/event/{eventId}") => {
+                self.serve_federation_event(m)
             }
             (Method::Get, "/_matrix/federation/v1/backfill/{roomId}") => {
                 self.serve_federation_backfill(m, req)
@@ -716,6 +724,36 @@ impl<H: Homeserver> Ingress<H> {
         );
         obj.insert("auth_chain".to_owned(), Json::Array(Vec::new()));
         Response::json_ok(Json::Object(obj).to_string())
+    }
+
+    /// `GET /_matrix/federation/v1/state_ids/{roomId}`: the room's current state
+    /// and auth-chain event ids as `{"pdu_ids":[…],"auth_chain_ids":[…]}`.
+    fn serve_federation_state_ids(&self, m: &RouteMatch) -> Response {
+        let Some(room_id) = m.param("roomId") else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        let Ok(room) = RoomId::parse(room_id) else {
+            return Response::error(400, &MatrixError::new("M_INVALID_PARAM", "invalid room id"));
+        };
+        Response::json_ok(self.server.state_ids(&room).to_string())
+    }
+
+    /// `GET /_matrix/federation/v1/event/{eventId}`: the single event by id,
+    /// wrapped as a transaction, or `404 M_NOT_FOUND` if this server lacks it.
+    fn serve_federation_event(&self, m: &RouteMatch) -> Response {
+        let Some(event_id) = m.param("eventId") else {
+            return Response::error(
+                400,
+                &MatrixError::new("M_INVALID_PARAM", "missing path parameter"),
+            );
+        };
+        match self.server.event_transaction(event_id) {
+            Some(txn) => Response::json_ok(txn.to_string()),
+            None => Response::error(404, &MatrixError::not_found("event not found")),
+        }
     }
 
     /// `GET /_matrix/federation/v1/backfill/{roomId}?v=<eventId>&limit=N`: serve
@@ -1480,9 +1518,9 @@ fn json_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use gm_api::{
-        Backfill, DeviceKeyStore, FederationAuth, FederationReceiver, JoinedRoom, Login,
-        MembershipChanger, MessageSender, PresenceStore, ReceiptSetter, RoomCreator, RoomReader,
-        RoomTimeline, ServerKeys, SyncProvider, TokenAuthority, TypingNotifier,
+        Backfill, DeviceKeyStore, FederationAuth, FederationRead, FederationReceiver, JoinedRoom,
+        Login, MembershipChanger, MessageSender, PresenceStore, ReceiptSetter, RoomCreator,
+        RoomReader, RoomTimeline, ServerKeys, SyncProvider, TokenAuthority, TypingNotifier,
     };
     use std::collections::BTreeMap;
 
@@ -1612,6 +1650,33 @@ mod tests {
             pdus.reverse();
             pdus.truncate(limit);
             pdus
+        }
+    }
+    impl FederationRead for TestServer {
+        fn event_transaction(&self, event_id: &str) -> Option<Json> {
+            let pdu = self
+                .timeline
+                .iter()
+                .find(|p| p.event_id.as_str() == event_id)?;
+            let mut obj = BTreeMap::new();
+            obj.insert(
+                "origin".to_owned(),
+                Json::String("gaussian.tech".to_owned()),
+            );
+            obj.insert("origin_server_ts".to_owned(), Json::Number(0.0));
+            obj.insert("pdus".to_owned(), Json::Array(vec![pdu.to_json()]));
+            Some(Json::Object(obj))
+        }
+        fn state_ids(&self, _room: &RoomId) -> Json {
+            let ids: Vec<Json> = self
+                .timeline
+                .iter()
+                .map(|p| Json::String(p.event_id.as_str().to_owned()))
+                .collect();
+            let mut obj = BTreeMap::new();
+            obj.insert("pdu_ids".to_owned(), Json::Array(ids));
+            obj.insert("auth_chain_ids".to_owned(), Json::Array(Vec::new()));
+            Json::Object(obj)
         }
     }
     impl DeviceKeyStore for TestServer {
@@ -2640,6 +2705,59 @@ mod tests {
         let resp = authed().dispatch(
             Method::Get,
             "/_matrix/federation/v1/backfill/!room:gaussian.tech",
+        );
+        assert_eq!(resp.status, 401);
+        assert!(resp.body.contains("M_UNAUTHORIZED"));
+    }
+
+    #[test]
+    fn federation_event_read_returns_a_transaction_for_a_known_event() {
+        let req = Request::new(Method::Get, "/_matrix/federation/v1/event/$e2")
+            .with_authorization("X-Matrix origin=other.tld,key=\"ed25519:1\",sig=\"abc\"");
+        let resp = server_with_timeline().handle(&req);
+        assert_eq!(resp.status, 200);
+        let pdus = Json::parse(&resp.body)
+            .unwrap()
+            .get("pdus")
+            .and_then(Json::as_array)
+            .map(<[_]>::to_vec)
+            .expect("a pdus array");
+        assert_eq!(pdus.len(), 1);
+        assert_eq!(pdus[0].get("event_id").and_then(Json::as_str), Some("$e2"));
+    }
+
+    #[test]
+    fn federation_event_read_is_404_for_an_unknown_event() {
+        let req = Request::new(Method::Get, "/_matrix/federation/v1/event/$nope")
+            .with_authorization("X-Matrix origin=other.tld,key=\"ed25519:1\",sig=\"abc\"");
+        let resp = server_with_timeline().handle(&req);
+        assert_eq!(resp.status, 404);
+        assert!(resp.body.contains("\"errcode\":\"M_NOT_FOUND\""));
+    }
+
+    #[test]
+    fn federation_state_ids_returns_pdu_and_auth_chain_ids() {
+        let req = Request::new(
+            Method::Get,
+            "/_matrix/federation/v1/state_ids/!room:gaussian.tech",
+        )
+        .with_authorization("X-Matrix origin=other.tld,key=\"ed25519:1\",sig=\"abc\"");
+        let resp = server_with_timeline().handle(&req);
+        assert_eq!(resp.status, 200);
+        let body = Json::parse(&resp.body).unwrap();
+        let ids = body.get("pdu_ids").and_then(Json::as_array).unwrap();
+        assert_eq!(ids.len(), 2); // the double's two seeded events
+        assert!(body
+            .get("auth_chain_ids")
+            .and_then(Json::as_array)
+            .is_some());
+    }
+
+    #[test]
+    fn federation_state_ids_requires_a_signature() {
+        let resp = authed().dispatch(
+            Method::Get,
+            "/_matrix/federation/v1/state_ids/!room:gaussian.tech",
         );
         assert_eq!(resp.status, 401);
         assert!(resp.body.contains("M_UNAUTHORIZED"));
