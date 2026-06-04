@@ -10,17 +10,18 @@
 //! dependencies, so it compiles and runs anywhere `std` does.
 //!
 //! It is deliberately minimal (one request per connection, no keep-alive or
-//! TLS), but [`serve`] handles connections **concurrently** — each on its own
-//! thread, sharing the ingress over the thread-safe store. The production
-//! deployment swaps this for an async axum/hyper front that terminates TLS and
-//! multiplexes connections across a bounded pool; the [`Ingress`] it drives, and
-//! the request/response contract, are identical.
+//! TLS), but [`serve`] handles connections **concurrently** across a **bounded
+//! worker pool** (sized to the machine's parallelism), sharing the ingress over
+//! the thread-safe store. The production deployment swaps this for an async
+//! axum/hyper front that terminates TLS and multiplexes connections; the
+//! [`Ingress`] it drives, and the request/response contract, are identical.
 
 use crate::ingress::{Ingress, Request, Response};
 use crate::Method;
 use gm_api::{Homeserver, MatrixError};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::{mpsc, Arc, Mutex};
 
 /// The cap on a request body we will buffer, to bound memory on a hostile
 /// `Content-Length` (a real deployment makes this configurable).
@@ -212,24 +213,71 @@ pub fn serve_connection<H: Homeserver>(stream: &TcpStream, ingress: &Ingress<H>)
     Ok(())
 }
 
-/// Accept connections on `listener` forever, serving each on its own thread.
-///
-/// The ingress is shared across connection threads via an [`Arc`]; this is
-/// sound because the composed homeserver fronts a thread-safe store
-/// (`gm_store::SharedStore`, an `Arc<RwLock<…>>`). Per-connection errors are
-/// swallowed so one bad client cannot stop the server. A spawn-per-connection
-/// model keeps the scaffold simple; a bounded pool is a later refinement.
+/// The default worker-pool size: the machine's parallelism (≥ 4), so a bursty
+/// client load is served concurrently without an unbounded thread count.
+fn default_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(4)
+}
+
+/// Accept connections on `listener` forever, serving them across a bounded pool
+/// of worker threads sized to [`default_workers`]. See [`serve_with_workers`].
 pub fn serve<H>(listener: &TcpListener, ingress: Ingress<H>) -> io::Result<()>
 where
     H: Homeserver + Send + Sync + 'static,
 {
-    let ingress = std::sync::Arc::new(ingress);
+    serve_with_workers(listener, ingress, default_workers())
+}
+
+/// Accept connections on `listener` forever, dispatching each to a fixed pool of
+/// `workers` threads that pull from a shared queue.
+///
+/// The ingress is shared across the workers via an [`Arc`]; this is sound
+/// because the composed homeserver fronts a thread-safe store
+/// (`gm_store::SharedStore`, an `Arc<RwLock<…>>`). A bounded pool caps the
+/// server's thread count under load (unlike spawn-per-connection). Per-connection
+/// errors are swallowed so one bad client cannot stop the server. `workers` is
+/// clamped to at least 1.
+pub fn serve_with_workers<H>(
+    listener: &TcpListener,
+    ingress: Ingress<H>,
+    workers: usize,
+) -> io::Result<()>
+where
+    H: Homeserver + Send + Sync + 'static,
+{
+    let ingress = Arc::new(ingress);
+    let (tx, rx) = mpsc::channel::<TcpStream>();
+    let rx = Arc::new(Mutex::new(rx));
+
+    for _ in 0..workers.max(1) {
+        let rx = Arc::clone(&rx);
+        let ingress = Arc::clone(&ingress);
+        std::thread::spawn(move || loop {
+            // Take the next queued connection (briefly holding the queue lock).
+            let next = {
+                let guard = rx.lock().unwrap_or_else(|e| e.into_inner());
+                guard.recv()
+            };
+            match next {
+                Ok(stream) => {
+                    let _ = serve_connection(&stream, &ingress);
+                }
+                // The sender (accept loop) has gone away: the pool drains and
+                // the worker exits.
+                Err(_) => break,
+            }
+        });
+    }
+
     for connection in listener.incoming() {
         let stream = connection?;
-        let ingress = std::sync::Arc::clone(&ingress);
-        std::thread::spawn(move || {
-            let _ = serve_connection(&stream, &ingress);
-        });
+        // If every worker has somehow exited, stop accepting.
+        if tx.send(stream).is_err() {
+            break;
+        }
     }
     Ok(())
 }
@@ -393,7 +441,7 @@ mod tests {
 
     #[test]
     fn serve_handles_concurrent_connections() {
-        // `serve` spawns a thread per connection; fire several at once and check
+        // `serve` runs a bounded worker pool; fire several at once and check
         // they are all served. The serve loop runs forever on its own thread.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -411,6 +459,27 @@ mod tests {
             let (status, body) = c.join().unwrap();
             assert_eq!(status, 200);
             assert!(body.contains("\"v1.11\""));
+        }
+    }
+
+    #[test]
+    fn a_small_worker_pool_serves_more_clients_than_workers() {
+        // Two workers serve a dozen clients: every connection is queued and
+        // handled, proving the pool drains its backlog rather than dropping it.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let _ = serve_with_workers(&listener, Ingress::new(), 2);
+        });
+
+        let mut clients = Vec::new();
+        for _ in 0..12 {
+            clients.push(thread::spawn(move || {
+                send_request(addr, Method::Get, "/_matrix/client/versions", None, None).unwrap()
+            }));
+        }
+        for c in clients {
+            assert_eq!(c.join().unwrap().0, 200);
         }
     }
 
