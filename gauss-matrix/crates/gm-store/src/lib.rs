@@ -19,11 +19,13 @@
 #![deny(rust_2018_idioms)]
 
 pub mod audit;
+mod file;
 mod memory;
 #[cfg(feature = "rocksdb")]
 mod rocks;
 mod shared;
 
+pub use file::FileStore;
 pub use memory::MemoryStore;
 #[cfg(feature = "rocksdb")]
 pub use rocks::RocksStore;
