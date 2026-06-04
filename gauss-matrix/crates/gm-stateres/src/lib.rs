@@ -26,10 +26,11 @@
 //! 3. [`CachedResolver`] — memoise the resolution keyed by the (immutable) set
 //!    of input event ids, the resolved-state cache of §III.D, so recurrent
 //!    resolutions are not recomputed.
+//! 4. [`ParallelResolver`] — resolve many independent rooms concurrently across
+//!    a bounded worker pool over a shared, thread-safe resolved-state cache.
 //!
-//! The remaining work is the parallelised engine (a bounded worker pool over the
-//! resolved-state cache) and room-version-specific ordering tweaks; the v2
-//! algorithm, the partition, and the cache defined here are correct and tested
+//! The remaining work is room-version-specific ordering tweaks; the v2
+//! algorithm, the partition, and the caches defined here are correct and tested
 //! today.
 
 #![forbid(unsafe_code)]
@@ -41,6 +42,8 @@ pub mod auth;
 use gm_api::{events, Json, Pdu};
 use gm_util::EventId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// A room-state slot: `(event type, state key)`.
 pub type StateKey = (String, String);
@@ -427,6 +430,108 @@ impl CachedResolver {
     }
 }
 
+/// One resolution request: the candidate state maps to resolve and the events
+/// (`pdus`) their ordering and auth checks need.
+pub struct ResolveJob {
+    /// The candidate state maps to merge.
+    pub states: Vec<StateMap>,
+    /// The events referenced by the states and their auth chains.
+    pub pdus: HashMap<EventId, Pdu>,
+}
+
+/// A parallelised state-resolution engine over a shared resolved-state cache
+/// (spec §III.D): resolves many independent rooms' state concurrently across a
+/// bounded worker pool, memoising each resolution by its input event-id set so
+/// recurrent inputs are not recomputed. The cache is shared and thread-safe, so
+/// hits on one worker serve the others.
+#[derive(Clone)]
+pub struct ParallelResolver {
+    cache: Arc<Mutex<HashMap<Vec<String>, StateMap>>>,
+    hits: Arc<AtomicU64>,
+    misses: Arc<AtomicU64>,
+    workers: usize,
+}
+
+impl ParallelResolver {
+    /// An engine with a pool of `workers` threads (clamped to at least 1).
+    pub fn new(workers: usize) -> Self {
+        Self {
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            hits: Arc::new(AtomicU64::new(0)),
+            misses: Arc::new(AtomicU64::new(0)),
+            workers: workers.max(1),
+        }
+    }
+
+    /// Resolve `jobs` concurrently, returning the resolved state maps in the same
+    /// order. Each job is resolved by the v2 [`resolve`], consulting and filling
+    /// the shared cache; identical inputs resolve once and are reused.
+    pub fn resolve_batch(&self, jobs: &[ResolveJob]) -> Vec<StateMap> {
+        let next = AtomicUsize::new(0);
+        let results: Vec<Mutex<Option<StateMap>>> =
+            (0..jobs.len()).map(|_| Mutex::new(None)).collect();
+
+        std::thread::scope(|scope| {
+            for _ in 0..self.workers {
+                scope.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= jobs.len() {
+                        break;
+                    }
+                    let job = &jobs[i];
+                    let resolved = self.resolve_cached(&job.states, &job.pdus);
+                    *results[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(resolved);
+                });
+            }
+        });
+
+        results
+            .into_iter()
+            .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()).unwrap())
+            .collect()
+    }
+
+    /// Resolve a single input through the shared cache (also usable directly).
+    pub fn resolve_cached(&self, states: &[StateMap], pdus: &HashMap<EventId, Pdu>) -> StateMap {
+        let (unconflicted, conflicted) = separate(states);
+        if conflicted.is_empty() {
+            return unconflicted;
+        }
+        let key = input_key(states);
+        if let Some(cached) = self
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return cached.clone();
+        }
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        let resolved = resolve(states, pdus);
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, resolved.clone());
+        resolved
+    }
+
+    /// Number of cache hits so far.
+    pub fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    /// Number of cache misses so far.
+    pub fn misses(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
+    }
+
+    /// Number of distinct resolutions memoised.
+    pub fn cached_entries(&self) -> usize {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,5 +790,49 @@ mod tests {
         assert_eq!(resolver.cached_entries(), 0);
         assert_eq!(resolver.hits(), 0);
         assert_eq!(resolver.misses(), 0);
+    }
+
+    #[test]
+    fn parallel_resolver_matches_sequential_and_caches_duplicates() {
+        // Build several name-conflict jobs; two of them are identical so the
+        // shared cache should serve a hit.
+        let (mut pdus, base) = base_room();
+        let (a1, b1) = name_forks(&mut pdus, &base, "$old", 100, "$new", 200);
+        let job = |a: &StateMap, b: &StateMap| ResolveJob {
+            states: vec![a.clone(), b.clone()],
+            pdus: pdus.clone(),
+        };
+        let jobs = vec![job(&a1, &b1), job(&a1, &b1), job(&b1, &a1)];
+
+        let engine = ParallelResolver::new(4);
+        let out = engine.resolve_batch(&jobs);
+
+        // Every result matches the sequential v2 resolver, in order.
+        assert_eq!(out.len(), 3);
+        for (job, got) in jobs.iter().zip(&out) {
+            assert_eq!(*got, resolve(&job.states, &job.pdus));
+            assert_eq!(got.get(&slot("m.room.name", "")), Some(&ev("$new")));
+        }
+        // The three jobs share one input set, so the cache holds one entry and
+        // every lookup is accounted for. (Concurrent workers may each miss the
+        // empty cache before the first insert, so the exact hit/miss split is
+        // not deterministic — but their sum is, and there is at least one miss.)
+        assert_eq!(engine.cached_entries(), 1);
+        assert!(engine.misses() >= 1);
+        assert_eq!(engine.hits() + engine.misses(), 3);
+    }
+
+    #[test]
+    fn parallel_resolver_handles_an_empty_batch_and_single_worker() {
+        let engine = ParallelResolver::new(1);
+        assert!(engine.resolve_batch(&[]).is_empty());
+
+        let (mut pdus, base) = base_room();
+        let (a, b) = name_forks(&mut pdus, &base, "$old", 100, "$new", 200);
+        let out = engine.resolve_batch(&[ResolveJob {
+            states: vec![a, b],
+            pdus,
+        }]);
+        assert_eq!(out[0].get(&slot("m.room.name", "")), Some(&ev("$new")));
     }
 }
