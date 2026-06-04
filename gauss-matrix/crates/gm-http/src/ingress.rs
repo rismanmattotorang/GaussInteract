@@ -49,9 +49,11 @@
 //! - `GET /_matrix/federation/v1/backfill/{roomId}` → historical events at or
 //!   before the `v` events as `{"pdus":[…]}`;
 //! - `POST /_matrix/client/v3/keys/{upload,query,claim}` → upload/query E2EE
-//!   device keys and one-time-key counts, and claim a one-time key;
+//!   device keys and one-time-key counts (verifying the device self-signature),
+//!   and claim a one-time key;
 //! - `POST /_matrix/client/v3/keys/device_signing/upload` → upload cross-signing
-//!   keys (returned by `keys/query`);
+//!   keys, verifying each subordinate key's master signature (returned by
+//!   `keys/query`);
 //! - `GET /_matrix/federation/v1/user/devices/{userId}` → a user's device list
 //!   for a peer;
 //! - `GET /_matrix/key/v2/server` → this server's published signing keys
@@ -767,6 +769,31 @@ impl<H: Homeserver> Ingress<H> {
             .unwrap_or("default")
             .to_owned();
         if let Some(device_keys) = body.get("device_keys") {
+            // When the device keys carry a self-signature, it must verify
+            // against the device's own ed25519 key — otherwise the upload is
+            // forged. (A bare device-keys object with no signature is accepted.)
+            if let (Some(user_id), Some(dev)) = (
+                device_keys.get("user_id").and_then(Json::as_str),
+                device_keys.get("device_id").and_then(Json::as_str),
+            ) {
+                let key_id = format!("ed25519:{dev}");
+                if has_signature(device_keys, user_id, &key_id) {
+                    let public = device_keys
+                        .get("keys")
+                        .and_then(|k| k.get(&key_id))
+                        .and_then(Json::as_str)
+                        .unwrap_or("");
+                    if !signed_json_verifies(device_keys, user_id, &key_id, public) {
+                        return Response::error(
+                            400,
+                            &MatrixError::new(
+                                "M_INVALID_SIGNATURE",
+                                "device key self-signature does not verify",
+                            ),
+                        );
+                    }
+                }
+            }
             self.server
                 .store_device_keys(user, &device_id, &device_keys.to_string());
         }
@@ -863,15 +890,37 @@ impl<H: Homeserver> Ingress<H> {
                 &MatrixError::new("M_BAD_JSON", "body must be an object"),
             );
         };
+        // The master key's public is the signer the subordinate keys must carry.
+        let master_public = body.get("master_key").and_then(cross_signing_public);
         for (field, usage) in [
             ("master_key", "master"),
             ("self_signing_key", "self_signing"),
             ("user_signing_key", "user_signing"),
         ] {
-            if let Some(key) = body.get(field) {
-                self.server
-                    .store_cross_signing_key(user, usage, &key.to_string());
+            let Some(key) = body.get(field) else {
+                continue;
+            };
+            // A self-signing / user-signing key, when signed, must verify against
+            // the uploaded master key (the chain of trust); a bad signature is
+            // rejected. A key without signatures is accepted (lenient scaffold).
+            if field != "master_key" {
+                if let Some(master_public) = &master_public {
+                    let key_id = format!("ed25519:{master_public}");
+                    if has_signature(key, user.as_str(), &key_id)
+                        && !signed_json_verifies(key, user.as_str(), &key_id, master_public)
+                    {
+                        return Response::error(
+                            400,
+                            &MatrixError::new(
+                                "M_INVALID_SIGNATURE",
+                                "cross-signing key is not validly signed by the master key",
+                            ),
+                        );
+                    }
+                }
             }
+            self.server
+                .store_cross_signing_key(user, usage, &key.to_string());
         }
         Response::json_ok("{}".to_owned())
     }
@@ -1200,6 +1249,48 @@ fn room_id_body(room_id: &str) -> String {
     let mut obj = BTreeMap::new();
     obj.insert("room_id".to_owned(), Json::String(room_id.to_owned()));
     Json::Object(obj).to_string()
+}
+
+/// Whether a Matrix "signed JSON" object carries a signature at
+/// `signatures[signer][key_id]`.
+fn has_signature(obj: &Json, signer: &str, key_id: &str) -> bool {
+    obj.get("signatures")
+        .and_then(|s| s.get(signer))
+        .and_then(|k| k.get(key_id))
+        .is_some()
+}
+
+/// Verify a Matrix "signed JSON" object: the Ed25519 signature at
+/// `signatures[signer][key_id]`, taken over the object with its `signatures` and
+/// `unsigned` removed and canonicalised, must verify against `public_key`.
+fn signed_json_verifies(obj: &Json, signer: &str, key_id: &str, public_key: &str) -> bool {
+    let Some(sig) = obj
+        .get("signatures")
+        .and_then(|s| s.get(signer))
+        .and_then(|k| k.get(key_id))
+        .and_then(Json::as_str)
+    else {
+        return false;
+    };
+    let mut unsigned = obj.clone();
+    if let Json::Object(map) = &mut unsigned {
+        map.remove("signatures");
+        map.remove("unsigned");
+    }
+    gm_util::ed25519::verify_b64(unsigned.to_string().as_bytes(), sig, public_key)
+}
+
+/// The Ed25519 public key a cross-signing key advertises (the value of the
+/// first `ed25519:…` entry in its `keys` map), if any.
+fn cross_signing_public(key: &Json) -> Option<String> {
+    key.get("keys")
+        .and_then(Json::as_object)
+        .and_then(|keys| {
+            keys.iter()
+                .find(|(id, _)| id.starts_with("ed25519:"))
+                .and_then(|(_, v)| v.as_str())
+        })
+        .map(str::to_owned)
 }
 
 /// The `ephemeral` block of a joined room: an `{"events":[…]}` carrying the
@@ -2571,6 +2662,97 @@ mod tests {
             .and_then(Json::as_u64);
         // The double echoes the offered counts: two curve25519 keys.
         assert_eq!(counts, Some(2));
+    }
+
+    // The canonical (signatures-free) form of a JSON object, for signing.
+    fn canonical(s: &str) -> String {
+        Json::parse(s).unwrap().to_string()
+    }
+
+    #[test]
+    fn keys_upload_accepts_a_valid_device_self_signature() {
+        let seed = gm_util::ed25519::seed_from_material("alice-DEV1");
+        let public = gm_util::ed25519::public_key_b64(&seed).unwrap();
+        let unsigned = format!(
+            r#"{{"algorithms":["m.olm.v1"],"device_id":"DEV1","keys":{{"ed25519:DEV1":"{public}"}},"user_id":"@alice:gaussian.tech"}}"#
+        );
+        let sig = gm_util::ed25519::sign_b64(canonical(&unsigned).as_bytes(), &seed);
+        let body = format!(
+            r#"{{"device_keys":{{"algorithms":["m.olm.v1"],"device_id":"DEV1","keys":{{"ed25519:DEV1":"{public}"}},"user_id":"@alice:gaussian.tech","signatures":{{"@alice:gaussian.tech":{{"ed25519:DEV1":"{sig}"}}}}}}}}"#
+        );
+        let req = Request::new(Method::Post, "/_matrix/client/v3/keys/upload")
+            .with_authorization("Bearer tok123")
+            .with_body(&body);
+        assert_eq!(authed().handle(&req).status, 200);
+    }
+
+    #[test]
+    fn keys_upload_rejects_an_invalid_device_self_signature() {
+        let seed = gm_util::ed25519::seed_from_material("alice-DEV1");
+        let public = gm_util::ed25519::public_key_b64(&seed).unwrap();
+        // Sign with the wrong key — the self-signature will not verify.
+        let wrong = gm_util::ed25519::seed_from_material("impostor");
+        let unsigned = format!(
+            r#"{{"device_id":"DEV1","keys":{{"ed25519:DEV1":"{public}"}},"user_id":"@alice:gaussian.tech"}}"#
+        );
+        let sig = gm_util::ed25519::sign_b64(canonical(&unsigned).as_bytes(), &wrong);
+        let body = format!(
+            r#"{{"device_keys":{{"device_id":"DEV1","keys":{{"ed25519:DEV1":"{public}"}},"user_id":"@alice:gaussian.tech","signatures":{{"@alice:gaussian.tech":{{"ed25519:DEV1":"{sig}"}}}}}}}}"#
+        );
+        let req = Request::new(Method::Post, "/_matrix/client/v3/keys/upload")
+            .with_authorization("Bearer tok123")
+            .with_body(&body);
+        let resp = authed().handle(&req);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("\"errcode\":\"M_INVALID_SIGNATURE\""));
+    }
+
+    #[test]
+    fn device_signing_upload_validates_the_master_signature() {
+        let master_seed = gm_util::ed25519::seed_from_material("alice-master");
+        let master_public = gm_util::ed25519::public_key_b64(&master_seed).unwrap();
+        let ss_public =
+            gm_util::ed25519::public_key_b64(&gm_util::ed25519::seed_from_material("alice-ss"))
+                .unwrap();
+
+        let master_key = format!(
+            r#"{{"keys":{{"ed25519:{master_public}":"{master_public}"}},"usage":["master"],"user_id":"@alice:gaussian.tech"}}"#
+        );
+        let ss_unsigned = format!(
+            r#"{{"keys":{{"ed25519:{ss_public}":"{ss_public}"}},"usage":["self_signing"],"user_id":"@alice:gaussian.tech"}}"#
+        );
+        // A valid self-signing key is signed by the master key.
+        let good_sig = gm_util::ed25519::sign_b64(canonical(&ss_unsigned).as_bytes(), &master_seed);
+        let ss_good = format!(
+            r#"{{"keys":{{"ed25519:{ss_public}":"{ss_public}"}},"usage":["self_signing"],"user_id":"@alice:gaussian.tech","signatures":{{"@alice:gaussian.tech":{{"ed25519:{master_public}":"{good_sig}"}}}}}}"#
+        );
+        let good_body = format!(r#"{{"master_key":{master_key},"self_signing_key":{ss_good}}}"#);
+        let good = Request::new(
+            Method::Post,
+            "/_matrix/client/v3/keys/device_signing/upload",
+        )
+        .with_authorization("Bearer tok123")
+        .with_body(&good_body);
+        assert_eq!(authed().handle(&good).status, 200);
+
+        // Signed by the wrong key -> rejected.
+        let bad_sig = gm_util::ed25519::sign_b64(
+            canonical(&ss_unsigned).as_bytes(),
+            &gm_util::ed25519::seed_from_material("impostor"),
+        );
+        let ss_bad = format!(
+            r#"{{"keys":{{"ed25519:{ss_public}":"{ss_public}"}},"usage":["self_signing"],"user_id":"@alice:gaussian.tech","signatures":{{"@alice:gaussian.tech":{{"ed25519:{master_public}":"{bad_sig}"}}}}}}"#
+        );
+        let bad_body = format!(r#"{{"master_key":{master_key},"self_signing_key":{ss_bad}}}"#);
+        let bad = Request::new(
+            Method::Post,
+            "/_matrix/client/v3/keys/device_signing/upload",
+        )
+        .with_authorization("Bearer tok123")
+        .with_body(&bad_body);
+        let resp = authed().handle(&bad);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("\"errcode\":\"M_INVALID_SIGNATURE\""));
     }
 
     #[test]
