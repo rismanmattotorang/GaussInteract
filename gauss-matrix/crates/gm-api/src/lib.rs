@@ -24,6 +24,7 @@ pub mod error;
 pub mod events;
 pub mod json;
 pub mod pdu;
+pub mod redaction;
 pub mod room_version;
 pub mod server;
 

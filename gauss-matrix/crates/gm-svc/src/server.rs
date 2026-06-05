@@ -809,7 +809,7 @@ impl<S: Store + Clone> MembershipChanger for GaussServer<S> {
             content_json: single_field("membership", membership),
         };
         // The event id is the content-addressed reference hash of the event.
-        let event_id = pdu.reference_id();
+        let event_id = pdu.reference_id(RoomVersion::MAX_SUPPORTED);
         pdu.event_id = EventId::parse(event_id.clone()).ok()?;
         // Authorize the transition against the join-rules / invite / power-level
         // state machine before accepting it.
@@ -872,7 +872,7 @@ impl<S: Store + Clone> RoomCreator for GaussServer<S> {
                 auth_events: Vec::new(),
                 content_json: content,
             };
-            let event_id = EventId::parse(pdu.reference_id()).ok()?;
+            let event_id = EventId::parse(pdu.reference_id(RoomVersion::MAX_SUPPORTED)).ok()?;
             pdu.event_id = event_id.clone();
             rooms.append(&pdu);
             prev_events = vec![event_id];
@@ -934,7 +934,7 @@ impl<S: Store + Clone> MessageSender for GaussServer<S> {
             content_json: content.to_owned(),
         };
         // The event id is the content-addressed reference hash of the event.
-        let event_id = pdu.reference_id();
+        let event_id = pdu.reference_id(RoomVersion::MAX_SUPPORTED);
         pdu.event_id = EventId::parse(event_id.clone()).ok()?;
         // Authorize the event against current room state before accepting it: a
         // non-member (or insufficiently-powered sender) cannot send.
@@ -1925,7 +1925,7 @@ mod tests {
             .into_iter()
             .find(|p| p.event_id.as_str() == one)
             .unwrap();
-        assert_eq!(pdu.reference_id(), one);
+        assert_eq!(pdu.reference_id(RoomVersion::MAX_SUPPORTED), one);
     }
 
     #[test]

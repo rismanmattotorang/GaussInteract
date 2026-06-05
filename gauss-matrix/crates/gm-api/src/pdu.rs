@@ -53,30 +53,38 @@ impl Pdu {
             .map(|state_key| (self.kind.as_str(), state_key))
     }
 
-    /// The content-addressed **reference-hash event id** for this PDU
-    /// (room version 3+): `$` + URL-safe unpadded base64 of the SHA-256 of the
-    /// event's canonical JSON. The canonical form is [`Self::to_json`] without
-    /// the `event_id` (and, in production, without `signatures`/`unsigned`), so
-    /// the id is determined entirely by the event's content and DAG position.
-    pub fn reference_id(&self) -> String {
-        let mut obj = match self.to_json() {
+    /// The **content hash** of this event: unpadded base64 of the SHA-256 of the
+    /// event's canonical JSON *without* `event_id`, `hashes`, `signatures` or
+    /// `unsigned` (spec §III.D). It is published in the event's `hashes.sha256`
+    /// and lets a peer verify the content even after the event is redacted.
+    pub fn content_hash(&self) -> String {
+        let canonical = Json::Object(self.unhashed()).to_string();
+        gm_util::ed25519::base64_encode(&gm_util::hashing::sha256(canonical.as_bytes()))
+    }
+
+    /// The content-addressed **reference-hash event id** for this PDU at
+    /// `room_version` (room version 3+): `$` + URL-safe unpadded base64 of the
+    /// SHA-256 of the **redacted** event's canonical JSON (with `event_id`,
+    /// `signatures` and `unsigned` removed). Redacting before hashing makes the
+    /// id invariant under later redaction; the redacted event still carries the
+    /// `hashes.sha256` content hash, so the id transitively binds the content.
+    pub fn reference_id(&self, room_version: u8) -> String {
+        let redacted = crate::redaction::redact(&self.to_json(), room_version);
+        let mut obj = match redacted {
             Json::Object(map) => map,
             _ => BTreeMap::new(),
         };
         obj.remove("event_id");
+        obj.remove("signatures");
+        obj.remove("unsigned");
         let canonical = Json::Object(obj).to_string();
         gm_util::hashing::reference_id(canonical.as_bytes())
     }
 
-    /// Serialize this PDU to its Matrix JSON form (the shape federation sends and
-    /// the event-storage / `/state` paths return). `content_json` is embedded as
-    /// the parsed `content` object (an empty object if it does not parse).
-    pub fn to_json(&self) -> Json {
+    /// The event's fields used for the content hash: everything in [`Self::to_json`]
+    /// except the derived `event_id` and `hashes`.
+    fn unhashed(&self) -> BTreeMap<String, Json> {
         let mut obj = BTreeMap::new();
-        obj.insert(
-            "event_id".into(),
-            Json::String(self.event_id.as_str().into()),
-        );
         obj.insert("room_id".into(), Json::String(self.room_id.as_str().into()));
         obj.insert("sender".into(), Json::String(self.sender.as_str().into()));
         obj.insert("type".into(), Json::String(self.kind.clone()));
@@ -94,6 +102,22 @@ impl Pdu {
             "content".into(),
             Json::parse(&self.content_json).unwrap_or_else(|_| Json::Object(BTreeMap::new())),
         );
+        obj
+    }
+
+    /// Serialize this PDU to its Matrix JSON form (the shape federation sends and
+    /// the event-storage / `/state` paths return). `content_json` is embedded as
+    /// the parsed `content` object (an empty object if it does not parse), and a
+    /// `hashes.sha256` content hash is attached.
+    pub fn to_json(&self) -> Json {
+        let mut obj = self.unhashed();
+        obj.insert(
+            "event_id".into(),
+            Json::String(self.event_id.as_str().into()),
+        );
+        let mut hashes = BTreeMap::new();
+        hashes.insert("sha256".to_owned(), Json::String(self.content_hash()));
+        obj.insert("hashes".into(), Json::Object(hashes));
         Json::Object(obj)
     }
 
@@ -224,7 +248,7 @@ mod tests {
     fn reference_id_is_content_addressed_and_id_independent() {
         let mut a = pdu(events::ROOM_MESSAGE, None);
         a.content_json = r#"{"body":"one"}"#.to_owned();
-        let id = a.reference_id();
+        let id = a.reference_id(11);
         // A reference-hash id is `$` + URL-safe base64 of SHA-256, not the
         // event's own (placeholder) id.
         assert!(id.starts_with('$') && id.len() > 1);
@@ -232,11 +256,39 @@ mod tests {
         // It does not depend on the carried event_id …
         let mut a2 = a.clone();
         a2.event_id = EventId::parse("$different").unwrap();
-        assert_eq!(a.reference_id(), a2.reference_id());
+        assert_eq!(a.reference_id(11), a2.reference_id(11));
         // … but it does depend on the content.
         let mut b = a.clone();
         b.content_json = r#"{"body":"two"}"#.to_owned();
-        assert_ne!(a.reference_id(), b.reference_id());
+        assert_ne!(a.reference_id(11), b.reference_id(11));
+    }
+
+    #[test]
+    fn redacting_a_message_does_not_change_its_reference_id() {
+        // A message's content is fully stripped by redaction, but its id is the
+        // hash of the redacted form (which keeps the content hash), so redacting
+        // the event leaves its id unchanged.
+        let mut a = pdu(events::ROOM_MESSAGE, None);
+        a.content_json = r#"{"body":"secret","extra":1}"#.to_owned();
+        let id = a.reference_id(11);
+
+        // The event id and content hash appear in the JSON.
+        let json = a.to_json();
+        assert!(json
+            .get("hashes")
+            .and_then(|h| h.get("sha256"))
+            .and_then(Json::as_str)
+            .is_some());
+
+        // Compute the id from the redacted event directly: same id.
+        let redacted = crate::redaction::redact(&a.to_json(), 11);
+        let mut obj = match redacted {
+            Json::Object(m) => m,
+            _ => unreachable!(),
+        };
+        obj.remove("event_id");
+        let canonical = Json::Object(obj).to_string();
+        assert_eq!(gm_util::hashing::reference_id(canonical.as_bytes()), id);
     }
 
     #[test]
