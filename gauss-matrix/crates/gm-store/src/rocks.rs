@@ -92,6 +92,37 @@ impl Store for RocksStore {
     fn count(&self, cf: &str) -> usize {
         self.scan(cf).len()
     }
+
+    fn scan_paged(&self, cf: &str, after: Option<&str>, limit: usize) -> Vec<(String, Vec<u8>)> {
+        let prefix = Self::prefix(cf);
+        // Seek to just after the cursor (or the prefix start), then take `limit`.
+        let seek = match after {
+            Some(a) => Self::composite(cf, a),
+            None => prefix.clone(),
+        };
+        let mut out = Vec::new();
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(seek.as_bytes(), Direction::Forward));
+        for item in iter {
+            if out.len() >= limit {
+                break;
+            }
+            let Ok((raw_key, value)) = item else { break };
+            let Ok(key) = std::str::from_utf8(&raw_key) else {
+                continue;
+            };
+            let Some(stripped) = key.strip_prefix(&prefix) else {
+                break;
+            };
+            // `From` seeks to >= the cursor's composite key; exclude the cursor.
+            if after == Some(stripped) {
+                continue;
+            }
+            out.push((stripped.to_owned(), value.to_vec()));
+        }
+        out
+    }
 }
 
 #[cfg(test)]
