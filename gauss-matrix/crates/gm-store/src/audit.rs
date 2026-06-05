@@ -45,8 +45,10 @@ pub fn append<S: Store>(store: &mut S, actor: &str, event: &str) {
         prev_hash,
         hash,
     };
-    // Zero-padded sequence key keeps Store::scan in append order.
-    store.put(cf::AUDIT_LOG, &seq_key(seq), encode(&entry).as_bytes());
+    // Zero-padded sequence key keeps Store::scan in append order. Audit logging
+    // is best-effort here (the call returns no error); a deployment that must
+    // not lose audit entries would propagate a write failure.
+    let _ = store.put(cf::AUDIT_LOG, &seq_key(seq), encode(&entry).as_bytes());
 }
 
 /// Load all audit entries, oldest first.
@@ -140,11 +142,13 @@ mod tests {
             prev_hash: entries(&store)[1].prev_hash,
             hash: entries(&store)[1].hash,
         };
-        store.put(
-            cf::AUDIT_LOG,
-            "00000000000000000001",
-            encode(&forged).as_bytes(),
-        );
+        store
+            .put(
+                cf::AUDIT_LOG,
+                "00000000000000000001",
+                encode(&forged).as_bytes(),
+            )
+            .unwrap();
         assert_eq!(verify(&store), Err(1));
     }
 }

@@ -42,14 +42,15 @@ impl<S: Store> SessionStore<S> {
     /// Mint a new access token for `user`, persist the mapping, and return it.
     pub fn create(&mut self, user: &UserId) -> String {
         let token = self.mint(user);
-        self.store
+        let _ = self
+            .store
             .put(cf::ACCESS_TOKENS, &token, user.as_str().as_bytes());
         token
     }
 
     /// Revoke a token (logout): it no longer authenticates anyone.
     pub fn revoke(&mut self, token: &str) {
-        self.store.delete(cf::ACCESS_TOKENS, token);
+        let _ = self.store.delete(cf::ACCESS_TOKENS, token);
     }
 
     /// The user a token authenticates, if it is live.

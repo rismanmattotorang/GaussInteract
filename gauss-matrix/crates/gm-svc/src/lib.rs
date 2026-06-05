@@ -70,10 +70,13 @@ impl<S: Store> RoomService<S> {
     /// case; divergent state is merged via [`Self::resolve_forks`]). Also records
     /// it in the global event stream so incremental sync can slice by position.
     pub fn append(&mut self, pdu: &Pdu) {
-        self.store
+        // Persistence is best-effort here (append returns no error); the durable
+        // backends report write failures through the now-fallible Store trait.
+        let _ = self
+            .store
             .put(cf::EVENTS, &Self::timeline_key(pdu), &codec::encode(pdu));
         if let Some((kind, state_key)) = pdu.state_tuple() {
-            self.store.put(
+            let _ = self.store.put(
                 cf::ROOM_STATE,
                 &Self::state_key(&pdu.room_id, kind, state_key),
                 pdu.event_id.as_str().as_bytes(),
@@ -81,7 +84,7 @@ impl<S: Store> RoomService<S> {
         }
         // The global stream position is the current stream length (monotonic).
         let seq = self.store.count(cf::EVENT_STREAM);
-        self.store.put(
+        let _ = self.store.put(
             cf::EVENT_STREAM,
             &format!("{seq:020}"),
             format!("{}{SEP}{}", pdu.room_id.as_str(), pdu.event_id.as_str()).as_bytes(),

@@ -15,9 +15,9 @@
 //! dataset across the transport's connection threads, like [`crate::SharedStore`]
 //! but durable. Writes hold the lock across the mirror update and the file write,
 //! so they are serialised and crash-consistent per key (a temp file is renamed
-//! into place). The [`Store`] contract is infallible, so a transient I/O error on
-//! a write is swallowed (mirroring [`crate::RocksStore`]); the mirror still
-//! reflects it for this process.
+//! into place). A failed disk write is **surfaced** as a [`crate::StoreError`]
+//! (the in-memory mirror still reflects it for this process), so callers that
+//! care about durability can react instead of losing the write silently.
 
 use crate::{MemoryStore, Store};
 use std::path::{Path, PathBuf};
@@ -55,7 +55,7 @@ impl FileStore {
                     continue;
                 };
                 let value = std::fs::read(key_entry.path())?;
-                mem.put(&cf, &key, &value);
+                let _ = mem.put(&cf, &key, &value); // in-memory put is infallible
             }
         }
 
@@ -80,25 +80,33 @@ impl FileStore {
         std::fs::rename(&tmp, &path)
     }
 
-    /// Remove the on-disk file for `(cf, key)`, if any.
-    fn persist_delete(&self, cf: &str, key: &str) {
+    /// Remove the on-disk file for `(cf, key)`. A missing file is not an error
+    /// (delete is a no-op when absent); any other I/O failure is surfaced.
+    fn persist_delete(&self, cf: &str, key: &str) -> std::io::Result<()> {
         let path = self.root.join(cf).join(hex_encode(key.as_bytes()));
-        let _ = std::fs::remove_file(path);
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 
 impl Store for FileStore {
-    fn put(&mut self, cf: &str, key: &str, value: &[u8]) {
+    fn put(&mut self, cf: &str, key: &str, value: &[u8]) -> Result<(), crate::StoreError> {
         let mut mem = self.lock();
-        mem.put(cf, key, value);
-        // Best-effort, like RocksStore: the Store contract is infallible.
-        let _ = self.persist_put(cf, key, value);
+        mem.put(cf, key, value)?;
+        // Surface a persistence failure rather than swallowing it (the mirror
+        // already reflects the write for this process).
+        self.persist_put(cf, key, value)?;
+        Ok(())
     }
 
-    fn delete(&mut self, cf: &str, key: &str) {
+    fn delete(&mut self, cf: &str, key: &str) -> Result<(), crate::StoreError> {
         let mut mem = self.lock();
-        mem.delete(cf, key);
-        self.persist_delete(cf, key);
+        mem.delete(cf, key)?;
+        self.persist_delete(cf, key)?;
+        Ok(())
     }
 
     fn get(&self, cf: &str, key: &str) -> Option<Vec<u8>> {
@@ -178,9 +186,9 @@ mod tests {
         let tmp = TempDir::new();
         {
             let mut store = FileStore::open(&tmp.0).unwrap();
-            store.put(cf::EVENTS, "!r:x\u{1f}k", b"v1");
-            store.put(cf::ROOM_STATE, "s", b"v2");
-            store.delete(cf::EVENTS, "gone"); // no-op
+            store.put(cf::EVENTS, "!r:x\u{1f}k", b"v1").unwrap();
+            store.put(cf::ROOM_STATE, "s", b"v2").unwrap();
+            store.delete(cf::EVENTS, "gone").unwrap(); // no-op
         }
         // Re-open the same directory: writes are durable and isolated by cf.
         let store = FileStore::open(&tmp.0).unwrap();
@@ -195,8 +203,8 @@ mod tests {
         let tmp = TempDir::new();
         {
             let mut store = FileStore::open(&tmp.0).unwrap();
-            store.put(cf::EVENTS, "k", b"v");
-            store.delete(cf::EVENTS, "k");
+            store.put(cf::EVENTS, "k", b"v").unwrap();
+            store.delete(cf::EVENTS, "k").unwrap();
         }
         let store = FileStore::open(&tmp.0).unwrap();
         assert!(store.get(cf::EVENTS, "k").is_none());
@@ -210,7 +218,7 @@ mod tests {
         let tmp = TempDir::new();
         let store = FileStore::open(&tmp.0).unwrap();
         let mut a = store.clone();
-        a.put(cf::EVENTS, "k", b"v");
+        a.put(cf::EVENTS, "k", b"v").unwrap();
         // Visible through the original handle (same underlying dataset).
         assert_eq!(store.get(cf::EVENTS, "k"), Some(b"v".to_vec()));
     }
@@ -224,7 +232,7 @@ mod tests {
             let mut store = store.clone();
             handles.push(std::thread::spawn(move || {
                 for i in 0..50 {
-                    store.put(cf::EVENTS, &format!("{t}-{i}"), b"v");
+                    store.put(cf::EVENTS, &format!("{t}-{i}"), b"v").unwrap();
                 }
             }));
         }
@@ -234,5 +242,19 @@ mod tests {
         // Re-open from disk: all 200 entries were persisted.
         let reopened = FileStore::open(&tmp.0).unwrap();
         assert_eq!(reopened.count(cf::EVENTS), 200);
+    }
+
+    #[test]
+    fn a_failed_disk_write_is_surfaced_not_swallowed() {
+        let tmp = TempDir::new();
+        let mut store = FileStore::open(&tmp.0).unwrap();
+        // Occupy the column-family path with a *file*, so creating its directory
+        // (and thus persisting) fails.
+        std::fs::write(tmp.0.join(cf::EVENTS), b"blocker").unwrap();
+
+        let result = store.put(cf::EVENTS, "k", b"v");
+        assert!(result.is_err(), "the disk write error must be reported");
+        // The in-memory mirror still reflects the write for this process.
+        assert_eq!(store.get(cf::EVENTS, "k"), Some(b"v".to_vec()));
     }
 }

@@ -81,7 +81,7 @@ impl<S: Store + Clone> GaussServer<S> {
     /// the published-key fetch (`/_matrix/key/v2/server`).
     pub fn register_federation_key(&self, origin: &str, public_key: &str) {
         let mut store = self.store.clone();
-        store.put(cf::FEDERATION_KEYS, origin, public_key.as_bytes());
+        let _ = store.put(cf::FEDERATION_KEYS, origin, public_key.as_bytes());
     }
 
     /// The registered federation public key for `origin`, if any.
@@ -97,7 +97,7 @@ impl<S: Store + Clone> GaussServer<S> {
         let mut store = self.store.clone();
         let cache_key = format!("{origin}{TXN_SEP}{key_id}");
         let value = format!("{public}{TXN_SEP}{valid_until_ts}");
-        store.put(cf::KEY_CACHE, &cache_key, value.as_bytes());
+        let _ = store.put(cf::KEY_CACHE, &cache_key, value.as_bytes());
     }
 
     /// The cached verify key for `(origin, key_id)`, but only if it has not yet
@@ -183,9 +183,9 @@ impl<S: Store + Clone> GaussServer<S> {
     /// name so the server can verify its own signatures.
     pub fn register_signing_key(&self, key_id: &str, seed: &str) {
         let mut store = self.store.clone();
-        store.put(cf::SERVER_KEYS, key_id, seed.as_bytes());
+        let _ = store.put(cf::SERVER_KEYS, key_id, seed.as_bytes());
         if let Some(public) = gm_fed::ed25519::public_key_b64(seed) {
-            store.put(cf::FEDERATION_KEYS, &self.server_name, public.as_bytes());
+            let _ = store.put(cf::FEDERATION_KEYS, &self.server_name, public.as_bytes());
         }
     }
 
@@ -675,7 +675,7 @@ impl<S: Store + Clone> DeviceKeyStore for GaussServer<S> {
     fn store_device_keys(&self, user: &UserId, device_id: &str, device_keys_json: &str) {
         let mut store = self.store.clone();
         let key = format!("{}{TXN_SEP}{device_id}", user.as_str());
-        store.put(cf::DEVICE_KEYS, &key, device_keys_json.as_bytes());
+        let _ = store.put(cf::DEVICE_KEYS, &key, device_keys_json.as_bytes());
     }
 
     fn store_one_time_keys(
@@ -687,7 +687,7 @@ impl<S: Store + Clone> DeviceKeyStore for GaussServer<S> {
         let mut store = self.store.clone();
         let prefix = format!("{}{TXN_SEP}{device_id}{TXN_SEP}", user.as_str());
         for (key_id, json) in keys {
-            store.put(
+            let _ = store.put(
                 cf::DEVICE_OTK,
                 &format!("{prefix}{key_id}"),
                 json.as_bytes(),
@@ -712,7 +712,7 @@ impl<S: Store + Clone> DeviceKeyStore for GaussServer<S> {
         let key_id = full_key.strip_prefix(&prefix)?.to_owned();
         let json = String::from_utf8(value).ok()?;
         let mut store = self.store.clone();
-        store.delete(cf::DEVICE_OTK, &full_key);
+        let _ = store.delete(cf::DEVICE_OTK, &full_key);
         Some((key_id, json))
     }
 
@@ -731,7 +731,7 @@ impl<S: Store + Clone> DeviceKeyStore for GaussServer<S> {
     fn store_cross_signing_key(&self, user: &UserId, usage: &str, key_json: &str) {
         let mut store = self.store.clone();
         let key = format!("{}{TXN_SEP}{usage}", user.as_str());
-        store.put(cf::CROSS_SIGNING, &key, key_json.as_bytes());
+        let _ = store.put(cf::CROSS_SIGNING, &key, key_json.as_bytes());
     }
 
     fn cross_signing_keys_of(&self, user: &UserId) -> Vec<(String, String)> {
@@ -945,7 +945,7 @@ impl<S: Store + Clone> MessageSender for GaussServer<S> {
 
         // Record the transaction so a retry is idempotent.
         let mut store = self.store.clone();
-        store.put(cf::TRANSACTIONS, &txn_key, event_id.as_bytes());
+        let _ = store.put(cf::TRANSACTIONS, &txn_key, event_id.as_bytes());
         Some(event_id)
     }
 }
@@ -962,9 +962,9 @@ impl<S: Store + Clone> TypingNotifier for GaussServer<S> {
         if typing {
             // Mark typing until now + timeout (capped so a client cannot pin it).
             let expiry = now_ms() + timeout_ms.min(MAX_TYPING_MS);
-            store.put(cf::TYPING, &key, expiry.to_string().as_bytes());
+            let _ = store.put(cf::TYPING, &key, expiry.to_string().as_bytes());
         } else {
-            store.delete(cf::TYPING, &key);
+            let _ = store.delete(cf::TYPING, &key);
         }
         true
     }
@@ -980,7 +980,7 @@ impl<S: Store + Clone> ReceiptSetter for GaussServer<S> {
         let key = format!("{}{TXN_SEP}{}", room.as_str(), user.as_str());
         let value = format!("{event_id}{TXN_SEP}{}", now_ms());
         let mut store = self.store.clone();
-        store.put(cf::RECEIPTS, &key, value.as_bytes());
+        let _ = store.put(cf::RECEIPTS, &key, value.as_bytes());
         true
     }
 }
@@ -989,7 +989,7 @@ impl<S: Store + Clone> PresenceStore for GaussServer<S> {
     fn set_presence(&self, user: &UserId, presence: &str, status_msg: Option<&str>) -> bool {
         let value = format!("{presence}{TXN_SEP}{}", status_msg.unwrap_or(""));
         let mut store = self.store.clone();
-        store.put(cf::PRESENCE, user.as_str(), value.as_bytes());
+        let _ = store.put(cf::PRESENCE, user.as_str(), value.as_bytes());
         true
     }
 
