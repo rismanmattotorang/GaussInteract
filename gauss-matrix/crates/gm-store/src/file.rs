@@ -120,6 +120,10 @@ impl Store for FileStore {
     fn count(&self, cf: &str) -> usize {
         self.lock().count(cf)
     }
+
+    fn scan_paged(&self, cf: &str, after: Option<&str>, limit: usize) -> Vec<(String, Vec<u8>)> {
+        self.lock().scan_paged(cf, after, limit)
+    }
 }
 
 /// Lowercase hex of `bytes` (a filesystem-safe, reversible key encoding).

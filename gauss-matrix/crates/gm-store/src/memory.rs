@@ -45,6 +45,22 @@ impl Store for MemoryStore {
     fn count(&self, cf: &str) -> usize {
         self.families.get(cf).map(|f| f.len()).unwrap_or(0)
     }
+
+    fn scan_paged(&self, cf: &str, after: Option<&str>, limit: usize) -> Vec<(String, Vec<u8>)> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let Some(family) = self.families.get(cf) else {
+            return Vec::new();
+        };
+        let bounds: (std::ops::Bound<String>, std::ops::Bound<String>) = (
+            after.map(|a| Excluded(a.to_owned())).unwrap_or(Unbounded),
+            Unbounded,
+        );
+        family
+            .range(bounds)
+            .take(limit)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -75,5 +91,40 @@ mod tests {
         // Deleting an absent key (or in an absent family) is harmless.
         store.delete("cf", "k").unwrap();
         store.delete("missing", "x").unwrap();
+    }
+
+    #[test]
+    fn scan_paged_walks_in_key_order_with_a_cursor() {
+        let mut store = MemoryStore::default();
+        for i in 0..10 {
+            store.put("cf", &format!("{i:02}"), b"v").unwrap();
+        }
+        // First page from the start.
+        let page1 = store.scan_paged("cf", None, 4);
+        let keys1: Vec<_> = page1.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(keys1, ["00", "01", "02", "03"]);
+        // Next page after the last key of page 1 (exclusive).
+        let page2 = store.scan_paged("cf", Some("03"), 4);
+        let keys2: Vec<_> = page2.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(keys2, ["04", "05", "06", "07"]);
+        // A cursor past the end yields nothing; an unknown cf is empty.
+        assert!(store.scan_paged("cf", Some("99"), 4).is_empty());
+        assert!(store.scan_paged("missing", None, 4).is_empty());
+    }
+
+    #[test]
+    fn stream_yields_every_entry_in_order_across_pages() {
+        let mut store = MemoryStore::default();
+        for i in 0..25 {
+            store
+                .put("cf", &format!("{i:03}"), format!("v{i}").as_bytes())
+                .unwrap();
+        }
+        // Stream in small pages; the result equals a full scan.
+        let streamed: Vec<_> = crate::stream(&store, "cf", 7).collect();
+        assert_eq!(streamed, store.scan("cf"));
+        assert_eq!(streamed.len(), 25);
+        // A page size of 0 is clamped (does not stall).
+        assert_eq!(crate::stream(&store, "cf", 0).count(), 25);
     }
 }

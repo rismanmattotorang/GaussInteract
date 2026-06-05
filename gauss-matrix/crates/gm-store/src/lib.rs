@@ -115,6 +115,52 @@ pub trait Store {
 
     /// Number of entries currently in `cf`.
     fn count(&self, cf: &str) -> usize;
+
+    /// A **page** of `cf`: up to `limit` `(key, value)` pairs whose key is
+    /// strictly greater than `after` (or from the start when `after` is `None`),
+    /// ordered by key. This is the cursor primitive for streaming a large column
+    /// family without materialising it — pass the last key of one page as the
+    /// `after` of the next (see [`stream`]).
+    ///
+    /// The default implementation pages over [`Store::scan`]; backends with
+    /// ordered iteration (all of ours) override it to seek directly.
+    fn scan_paged(&self, cf: &str, after: Option<&str>, limit: usize) -> Vec<(String, Vec<u8>)> {
+        self.scan(cf)
+            .into_iter()
+            .filter(|(k, _)| after.map_or(true, |a| k.as_str() > a))
+            .take(limit)
+            .collect()
+    }
+}
+
+/// Stream every entry of `cf` in key order, fetching `page_size` at a time via
+/// [`Store::scan_paged`] so the whole column family is never held in memory at
+/// once. `page_size` is clamped to at least 1.
+pub fn stream<'a, S: Store + ?Sized>(
+    store: &'a S,
+    cf: &'a str,
+    page_size: usize,
+) -> impl Iterator<Item = (String, Vec<u8>)> + 'a {
+    let page_size = page_size.max(1);
+    let mut buffer: std::collections::VecDeque<(String, Vec<u8>)> =
+        std::collections::VecDeque::new();
+    let mut cursor: Option<String> = None;
+    let mut done = false;
+    std::iter::from_fn(move || {
+        if buffer.is_empty() && !done {
+            let page = store.scan_paged(cf, cursor.as_deref(), page_size);
+            if page.len() < page_size {
+                done = true; // a short page is the last one
+            }
+            if let Some((last_key, _)) = page.last() {
+                cursor = Some(last_key.clone());
+            } else {
+                done = true;
+            }
+            buffer.extend(page);
+        }
+        buffer.pop_front()
+    })
 }
 
 /// A failure to apply a write to a durable [`Store`] backend (e.g. an I/O error

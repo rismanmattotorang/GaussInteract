@@ -63,6 +63,10 @@ impl Store for SharedStore {
     fn count(&self, cf: &str) -> usize {
         self.read().count(cf)
     }
+
+    fn scan_paged(&self, cf: &str, after: Option<&str>, limit: usize) -> Vec<(String, Vec<u8>)> {
+        self.read().scan_paged(cf, after, limit)
+    }
 }
 
 #[cfg(test)]
