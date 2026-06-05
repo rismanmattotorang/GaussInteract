@@ -12,9 +12,9 @@
 //! now persistent. (Mapping each `cf` onto a native RocksDB column family is a
 //! later tuning step; the trait contract is identical either way.)
 //!
-//! The [`Store`] trait is infallible by design (mirroring the in-memory
-//! backend), so transient RocksDB errors are swallowed here; a fallible storage
-//! trait is a separate, larger change tracked in the roadmap.
+//! Write failures from RocksDB are surfaced as a [`crate::StoreError`] through
+//! the fallible [`Store::put`] / [`Store::delete`]; reads are served as `None`
+//! on error (consistent with the in-memory backends).
 
 use crate::Store;
 use rocksdb::{Direction, IteratorMode, Options, DB};
@@ -49,15 +49,16 @@ impl RocksStore {
 }
 
 impl Store for RocksStore {
-    fn put(&mut self, cf: &str, key: &str, value: &[u8]) {
-        // Best-effort: the Store contract is infallible. A fallible trait is
-        // tracked in the roadmap; a real deployment would surface this.
-        let _ = self.db.put(Self::composite(cf, key).as_bytes(), value);
+    fn put(&mut self, cf: &str, key: &str, value: &[u8]) -> Result<(), crate::StoreError> {
+        self.db
+            .put(Self::composite(cf, key).as_bytes(), value)
+            .map_err(|e| crate::StoreError(e.to_string()))
     }
 
-    fn delete(&mut self, cf: &str, key: &str) {
-        // Best-effort, mirroring `put`: the Store contract is infallible.
-        let _ = self.db.delete(Self::composite(cf, key).as_bytes());
+    fn delete(&mut self, cf: &str, key: &str) -> Result<(), crate::StoreError> {
+        self.db
+            .delete(Self::composite(cf, key).as_bytes())
+            .map_err(|e| crate::StoreError(e.to_string()))
     }
 
     fn get(&self, cf: &str, key: &str) -> Option<Vec<u8>> {
@@ -121,9 +122,9 @@ mod tests {
     fn persists_isolates_column_families_and_orders_keys() {
         let tmp = TempDb::new();
         let mut store = RocksStore::open(&tmp.0).unwrap();
-        store.put(cf::EVENTS, "00001", b"e1");
-        store.put(cf::ROOM_STATE, "00000", b"s0");
-        store.put(cf::EVENTS, "00000", b"e0");
+        store.put(cf::EVENTS, "00001", b"e1").unwrap();
+        store.put(cf::ROOM_STATE, "00000", b"s0").unwrap();
+        store.put(cf::EVENTS, "00000", b"e0").unwrap();
 
         assert_eq!(store.get(cf::EVENTS, "00000"), Some(b"e0".to_vec()));
         let events: Vec<_> = store.scan(cf::EVENTS).into_iter().map(|(k, _)| k).collect();
@@ -137,7 +138,7 @@ mod tests {
         let tmp = TempDb::new();
         {
             let mut store = RocksStore::open(&tmp.0).unwrap();
-            store.put(cf::EVENTS, "k", b"v");
+            store.put(cf::EVENTS, "k", b"v").unwrap();
         }
         // Re-open the same path: the write is durable.
         let store = RocksStore::open(&tmp.0).unwrap();

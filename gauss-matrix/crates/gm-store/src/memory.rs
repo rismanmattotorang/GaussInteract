@@ -16,17 +16,19 @@ pub struct MemoryStore {
 }
 
 impl Store for MemoryStore {
-    fn put(&mut self, cf: &str, key: &str, value: &[u8]) {
+    fn put(&mut self, cf: &str, key: &str, value: &[u8]) -> Result<(), crate::StoreError> {
         self.families
             .entry(cf.to_owned())
             .or_default()
             .insert(key.to_owned(), value.to_vec());
+        Ok(())
     }
 
-    fn delete(&mut self, cf: &str, key: &str) {
+    fn delete(&mut self, cf: &str, key: &str) -> Result<(), crate::StoreError> {
         if let Some(family) = self.families.get_mut(cf) {
             family.remove(key);
         }
+        Ok(())
     }
 
     fn get(&self, cf: &str, key: &str) -> Option<Vec<u8>> {
@@ -52,9 +54,9 @@ mod tests {
     #[test]
     fn put_get_scan_are_ordered() {
         let mut store = MemoryStore::default();
-        store.put("cf", "00002", b"c");
-        store.put("cf", "00000", b"a");
-        store.put("cf", "00001", b"b");
+        store.put("cf", "00002", b"c").unwrap();
+        store.put("cf", "00000", b"a").unwrap();
+        store.put("cf", "00001", b"b").unwrap();
 
         assert_eq!(store.get("cf", "00001"), Some(b"b".to_vec()));
         assert_eq!(store.count("cf"), 3);
@@ -66,12 +68,12 @@ mod tests {
     #[test]
     fn delete_removes_a_key_and_is_a_noop_when_absent() {
         let mut store = MemoryStore::default();
-        store.put("cf", "k", b"v");
-        store.delete("cf", "k");
+        store.put("cf", "k", b"v").unwrap();
+        store.delete("cf", "k").unwrap();
         assert_eq!(store.get("cf", "k"), None);
         assert_eq!(store.count("cf"), 0);
         // Deleting an absent key (or in an absent family) is harmless.
-        store.delete("cf", "k");
-        store.delete("missing", "x");
+        store.delete("cf", "k").unwrap();
+        store.delete("missing", "x").unwrap();
     }
 }

@@ -83,7 +83,8 @@ pub(crate) fn store<S: Store>(
     value: &str,
 ) -> Result<(), MemoryError> {
     check_key(key)?;
-    store.put(
+    // Best-effort persistence (the durable backends report errors via Store).
+    let _ = store.put(
         cf::AGENT_MEMORY,
         &item_key(agent, room, key),
         value.as_bytes(),
@@ -119,7 +120,7 @@ pub(crate) fn recall_all<S: Store>(store: &S, agent: &AgentId, room: &RoomId) ->
 
 /// Forget a single memory item by key.
 pub(crate) fn forget<S: Store>(store: &mut S, agent: &AgentId, room: &RoomId, key: &str) {
-    store.delete(cf::AGENT_MEMORY, &item_key(agent, room, key));
+    let _ = store.delete(cf::AGENT_MEMORY, &item_key(agent, room, key));
 }
 
 #[cfg(test)]

@@ -44,12 +44,12 @@ impl SharedStore {
 }
 
 impl Store for SharedStore {
-    fn put(&mut self, cf: &str, key: &str, value: &[u8]) {
-        self.write().put(cf, key, value);
+    fn put(&mut self, cf: &str, key: &str, value: &[u8]) -> Result<(), crate::StoreError> {
+        self.write().put(cf, key, value)
     }
 
-    fn delete(&mut self, cf: &str, key: &str) {
-        self.write().delete(cf, key);
+    fn delete(&mut self, cf: &str, key: &str) -> Result<(), crate::StoreError> {
+        self.write().delete(cf, key)
     }
 
     fn get(&self, cf: &str, key: &str) -> Option<Vec<u8>> {
@@ -74,11 +74,11 @@ mod tests {
     fn clones_share_one_dataset() {
         let a = SharedStore::new();
         let mut b = a.clone();
-        b.put(cf::EVENTS, "k", b"v");
+        b.put(cf::EVENTS, "k", b"v").unwrap();
         // The write through `b` is visible through `a` — same underlying data.
         assert_eq!(a.get(cf::EVENTS, "k"), Some(b"v".to_vec()));
         assert_eq!(a.count(cf::EVENTS), 1);
-        b.delete(cf::EVENTS, "k");
+        b.delete(cf::EVENTS, "k").unwrap();
         assert_eq!(a.get(cf::EVENTS, "k"), None);
     }
 
@@ -92,7 +92,7 @@ mod tests {
             let mut store = store.clone();
             handles.push(std::thread::spawn(move || {
                 for i in 0..100 {
-                    store.put(cf::EVENTS, &format!("{t}-{i}"), b"v");
+                    store.put(cf::EVENTS, &format!("{t}-{i}"), b"v").unwrap();
                 }
             }));
         }

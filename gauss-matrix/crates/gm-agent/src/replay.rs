@@ -360,11 +360,13 @@ mod tests {
             "{}\u{1f}{}\u{1f}{}\u{1f}{}",
             orig.actor, "auto_allowed: exfiltrate", orig.prev_hash, orig.hash
         );
-        store.put(
-            gm_store::cf::AUDIT_LOG,
-            "00000000000000000001",
-            forged.as_bytes(),
-        );
+        store
+            .put(
+                gm_store::cf::AUDIT_LOG,
+                "00000000000000000001",
+                forged.as_bytes(),
+            )
+            .unwrap();
 
         let session = replay_session(&store, AGENT);
         assert!(!session.chain_intact);

@@ -97,13 +97,17 @@ pub mod cf {
 /// implement — and writes within a single logical operation are expected to be
 /// atomic in real backends (modelled trivially by the in-memory store).
 pub trait Store {
-    /// Insert or overwrite `key` in column family `cf`.
-    fn put(&mut self, cf: &str, key: &str, value: &[u8]);
+    /// Insert or overwrite `key` in column family `cf`. Returns a [`StoreError`]
+    /// if a durable backend failed to persist the write (the in-memory backends
+    /// never fail).
+    fn put(&mut self, cf: &str, key: &str, value: &[u8]) -> Result<(), StoreError>;
 
-    /// Remove `key` from column family `cf` (a no-op if absent).
-    fn delete(&mut self, cf: &str, key: &str);
+    /// Remove `key` from column family `cf` (a no-op if absent). Returns a
+    /// [`StoreError`] if a durable backend failed to apply the deletion.
+    fn delete(&mut self, cf: &str, key: &str) -> Result<(), StoreError>;
 
-    /// Fetch `key` from column family `cf`, if present.
+    /// Fetch `key` from column family `cf`, if present. Reads are served from the
+    /// resident dataset and are infallible.
     fn get(&self, cf: &str, key: &str) -> Option<Vec<u8>>;
 
     /// All `(key, value)` pairs in `cf`, ordered by key ascending.
@@ -111,4 +115,24 @@ pub trait Store {
 
     /// Number of entries currently in `cf`.
     fn count(&self, cf: &str) -> usize;
+}
+
+/// A failure to apply a write to a durable [`Store`] backend (e.g. an I/O error
+/// from the filesystem or embedded KV). Reads are infallible, so this only
+/// arises from [`Store::put`] / [`Store::delete`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreError(pub String);
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "store write failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+impl From<std::io::Error> for StoreError {
+    fn from(e: std::io::Error) -> Self {
+        StoreError(e.to_string())
+    }
 }

@@ -36,7 +36,8 @@ impl<S: Store> AccountStore<S> {
     /// Register `user` with `password` (or reset it), persisting the verifier.
     pub fn register(&mut self, user: &UserId, password: &str) {
         let verifier = verifier(user, password);
-        self.store
+        let _ = self
+            .store
             .put(cf::ACCOUNTS, user.as_str(), verifier.as_bytes());
     }
 
